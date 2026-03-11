@@ -137,7 +137,7 @@ async def convert_to_telegram_format(work_dir: Path, status_msg):
     for webp in webp_files:
         gif_path = gifs_dir / (webp.stem + ".gif")
         subprocess.run([
-            "magick", str(webp),
+            "convert", str(webp),
             "-coalesce",
             "-resize", "100x100",
             str(gif_path)
