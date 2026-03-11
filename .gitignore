@@ -1,0 +1,29 @@
+# IDE
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite3
+*.db
+
+# Virtual environments
+venv/
+.env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local binaries
+ffmpeg.exe
+magick.exe
+
+# Bot temp data
+downloads/
+gifs/
+telegram_emotes/
