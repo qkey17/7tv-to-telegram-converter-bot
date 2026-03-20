@@ -1,19 +1,30 @@
+from telegram import BotCommand
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters
 
 from config import BOT_TOKEN
 from bot.handlers import handle_message, about_command
 
 
+# === Установка команд (меню в Telegram) ===
+async def post_init(app):
+    await app.bot.set_my_commands([
+        BotCommand("about", "О боте"),
+    ])
+
+
 def main():
     # === Инициализация приложения ===
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     # === Регистрация команд ===
-    # /about — информация о боте
     app.add_handler(CommandHandler("about", about_command))
 
     # === Обработка обычных сообщений ===
-    # Любой текст, который НЕ является командой
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # === Запуск бота ===
