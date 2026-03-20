@@ -66,3 +66,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         zip_path.unlink()
     except Exception as e:
         print(f"Ошибка очистки: {e}")
+
+
+def about_text() -> str:
+    return "Бот запущен."
+
+
+async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(about_text())
