@@ -34,9 +34,7 @@ def _encode_png_sequence_to_webm(frame_dir: Path, out_path: Path, crf: int) -> N
         "-framerate", str(TARGET_FPS),
         "-i", str(frame_dir / "frame_%03d.png"),
         "-vf", (
-            f"fps={TARGET_FPS},"
-            f"scale={TARGET_SIZE}:{TARGET_SIZE}:flags=lanczos:force_original_aspect_ratio=decrease,"
-            f"pad={TARGET_SIZE}:{TARGET_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000"
+            f"fps={TARGET_FPS},scale={TARGET_SIZE}:{TARGET_SIZE}:flags=lanczos"
         ),
         "-frames:v", "90",
         "-an",
