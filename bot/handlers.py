@@ -12,7 +12,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from config import CDN_BASE, SAVE_ROOT
-from converter.converter import convert_to_telegram_format
+from converter.converter import convert_to_telegram_format, convert_webp_to_webm
 from downloader.downloader import download_file
 from seven_tv.api import (
     extract_emote_id,
@@ -150,130 +150,165 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
     cancel_event = job.cancel_event
     work_dir = SAVE_ROOT / set_id
     work_dir.mkdir(exist_ok=True)
+    webm_dir = work_dir / "telegram_emotes"
+    webm_dir.mkdir(exist_ok=True)
     zip_path = SAVE_ROOT / f"{set_id}.zip"
 
     skipped_downloads: list[tuple[str, str]] = []
     skipped_convert: list[tuple[str, str]] = []
+    skipped_download_count = 0
+    skipped_convert_count = 0
+    downloaded = 0
+    converted = 0
+    total = 0
+
+    status_lock = asyncio.Lock()
+
+    async def set_status(text: str, active: bool = True) -> None:
+        async with status_lock:
+            await _edit_status(status_msg, text, active=active)
+
+    def render_status(phase: str, current: str) -> str:
+        return (
+            f"{phase}\n"
+            f"Скачано: {downloaded}/{total}\n"
+            f"Отправлено: {converted}/{total}\n"
+            f"Пропущено: {skipped_download_count + skipped_convert_count}\n"
+            f"Текущий: {current}"
+        )
 
     try:
         data = await asyncio.to_thread(fetch_emote_list, set_id)
         if not data or "emotes" not in data:
-            await _edit_status(status_msg, "Ошибка получения списка эмоутов.", active=False)
+            await set_status("Ошибка получения списка эмоутов.", active=False)
             return
 
-        total = len(data["emotes"])
-        downloaded = 0
-        skipped_download_count = 0
+        emotes = list(data["emotes"])
+        total = len(emotes)
+        queue: asyncio.Queue[tuple[str, Path] | None] = asyncio.Queue(maxsize=2)
 
-        await _edit_status(
-            status_msg,
-            f"📥 Скачивание эмоутов...\nГотово: 0/{total}\nПропущено: 0\nТекущий: —",
-        )
+        await set_status(render_status("📥 Скачивание эмоутов...", "—"))
 
-        for index, emote in enumerate(data["emotes"], 1):
-            if cancel_event.is_set():
-                break
+        async def producer() -> None:
+            nonlocal downloaded, skipped_download_count
 
-            emote_data = unwrap_emote(emote)
-            if not emote_data:
-                skipped_download_count += 1
-                skipped_downloads.append((f"эмоут #{index}", "не удалось прочитать данные"))
-                continue
+            try:
+                for index, emote in enumerate(emotes, 1):
+                    if cancel_event.is_set():
+                        break
 
-            name = safe_name(emote_data.get("name", f"emote_{index}"))
-            emote_id = emote_data.get("id")
-            files = emote_data.get("host", {}).get("files", [])
-            best_file = get_best_file(files)
+                    emote_data = unwrap_emote(emote)
+                    if not emote_data:
+                        skipped_download_count += 1
+                        skipped_downloads.append((f"эмоут #{index}", "не удалось прочитать данные"))
+                        await set_status(render_status("📥 Скачивание эмоутов...", f"эмоут #{index}"))
+                        continue
 
-            if not best_file or not emote_id:
-                skipped_download_count += 1
-                skipped_downloads.append((name, "нет WEBP-файла или id"))
-                continue
+                    name = safe_name(emote_data.get("name", f"emote_{index}"))
+                    emote_id = emote_data.get("id")
+                    files = emote_data.get("host", {}).get("files", [])
+                    best_file = get_best_file(files)
 
-            await _edit_status(
-                status_msg,
-                f"📥 Скачивание эмоутов...\nГотово: {downloaded}/{total}\nПропущено: {skipped_download_count}\nТекущий: {name}",
-            )
+                    if not best_file or not emote_id:
+                        skipped_download_count += 1
+                        skipped_downloads.append((name, "нет WEBP-файла или id"))
+                        await set_status(render_status("📥 Скачивание эмоутов...", name))
+                        continue
 
-            url = CDN_BASE.format(id=emote_id, file=best_file)
-            save_path = work_dir / f"{name}.webp"
+                    await set_status(render_status("📥 Скачивание эмоутов...", name))
 
-            ok = await asyncio.to_thread(download_file, url, save_path, cancel_event)
-            if ok:
-                downloaded += 1
-            else:
-                if cancel_event.is_set():
+                    url = CDN_BASE.format(id=emote_id, file=best_file)
+                    save_path = work_dir / f"{name}.webp"
+
+                    ok = await asyncio.to_thread(download_file, url, save_path, cancel_event)
+                    if ok:
+                        downloaded += 1
+                        await queue.put((name, save_path))
+                    else:
+                        if cancel_event.is_set():
+                            break
+                        skipped_download_count += 1
+                        skipped_downloads.append((name, "ошибка скачивания"))
+
+                    await set_status(render_status("📥 Скачивание эмоутов...", name))
+            finally:
+                await queue.put(None)
+
+        async def consumer() -> None:
+            nonlocal converted, skipped_convert_count
+
+            while True:
+                item = await queue.get()
+                if item is None:
                     break
-                skipped_download_count += 1
-                skipped_downloads.append((name, "ошибка скачивания"))
+
+                name, webp_path = item
+                if cancel_event.is_set():
+                    if webp_path.exists():
+                        try:
+                            webp_path.unlink()
+                        except Exception:
+                            pass
+                    continue
+
+                await set_status(render_status("🎬 Конвертация в WEBM...", name))
+
+                out_path = webm_dir / f"{webp_path.stem}.webm"
+                try:
+                    ok, reason = await asyncio.to_thread(convert_webp_to_webm, webp_path, out_path, cancel_event)
+                except ConversionCancelled:
+                    ok = False
+                    reason = "отменено"
+                except Exception as exc:
+                    ok = False
+                    reason = f"неожиданная ошибка: {exc}"
+
+                if ok:
+                    converted += 1
+                else:
+                    skipped_convert_count += 1
+                    skipped_convert.append((name, reason or "неизвестная ошибка"))
+
+                if webp_path.exists():
+                    try:
+                        webp_path.unlink()
+                    except Exception:
+                        pass
+
+                await set_status(render_status("🎬 Конвертация в WEBM...", name))
+
+        await asyncio.gather(producer(), consumer())
+
+        webm_files = sorted(webm_dir.glob("*.webm"))
+        skipped_items = skipped_downloads + skipped_convert
 
         if cancel_event.is_set():
-            await _edit_status(status_msg, "⛔ Отмена... Сохраняю то, что уже готово.")
-
-        await _edit_status(
-            status_msg,
-            f"⚙️ Скачано {downloaded}/{total}\n🎬 Конвертация в WEBM...",
-        )
-
-        webm_dir, converted, skipped_convert_count, skipped_convert = await convert_to_telegram_format(
-            work_dir,
-            status_msg,
-            cancel_event=cancel_event,
-            reply_markup=cancel_markup(),
-        )
-        skipped_convert = list(skipped_convert)
-
-        if cancel_event.is_set():
-            if not any(webm_dir.glob("*.webm")):
-                await _edit_status(status_msg, "⛔ Отмена. Готовых WEBM нет.", active=False)
+            if not webm_files:
+                await set_status(_format_summary("⛔ Отмена. Готовых WEBM нет.", total, 0, skipped_items), active=False)
                 return
 
-            await _edit_status(status_msg, "📦 Архивирую готовые WEBM...")
+            await set_status("📦 Архивирую готовые WEBM...")
             sent = await _send_zip_archive(update, webm_dir, zip_path, f"{set_id}.zip", cancel_event=cancel_event)
             if sent:
-                summary = _format_summary(
-                    "⛔ Отмена выполнена. Частичный архив отправлен.",
-                    total,
-                    converted,
-                    skipped_downloads + skipped_convert,
+                await set_status(
+                    _format_summary("⛔ Отмена выполнена. Частичный архив отправлен.", total, len(webm_files), skipped_items),
+                    active=False,
                 )
-                await _edit_status(status_msg, summary, active=False)
             else:
-                await _edit_status(status_msg, "⛔ Отмена. Архив не удалось собрать.", active=False)
+                await set_status(_format_summary("⛔ Отмена. Архив не удалось собрать.", total, 0, skipped_items), active=False)
             return
 
         if converted <= 0:
-            summary = _format_summary(
-                "Не удалось собрать итоговый файл.",
-                total,
-                0,
-                skipped_downloads + skipped_convert,
-            )
-            await _edit_status(status_msg, summary, active=False)
+            await set_status(_format_summary("Не удалось собрать итоговый файл.", total, 0, skipped_items), active=False)
             return
 
-        await _edit_status(
-            status_msg,
-            f"📦 Упаковываю архив...\nWEBM: {converted}\nПропущено: {skipped_convert_count}",
-        )
+        await set_status(f"📦 Упаковываю архив...\nWEBM: {converted}\nПропущено: {skipped_convert_count}")
         sent = await _send_zip_archive(update, webm_dir, zip_path, f"{set_id}.zip", cancel_event=cancel_event)
         if not sent:
-            summary = _format_summary(
-                "Не удалось собрать итоговый файл.",
-                total,
-                converted,
-                skipped_downloads + skipped_convert,
-            )
-            await _edit_status(status_msg, summary, active=False)
+            await set_status(_format_summary("Не удалось собрать итоговый файл.", total, converted, skipped_items), active=False)
             return
 
-        summary = _format_summary(
-            "✅ Готово!",
-            total,
-            converted,
-            skipped_downloads + skipped_convert,
-        )
-        await _edit_status(status_msg, summary, active=False)
+        await set_status(_format_summary("✅ Готово!", total, converted, skipped_items), active=False)
     except Exception as exc:
         await _edit_status(status_msg, f"Ошибка обработки: {exc}", active=False)
     finally:

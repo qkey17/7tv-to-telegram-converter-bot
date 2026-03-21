@@ -442,6 +442,9 @@ def _convert_single_webp(webp_path: Path, out_path: Path, cancel_event=None) -> 
 
     return False, gif_reason or reason or "не удалось конвертировать WEBP"
 
+def convert_webp_to_webm(webp_path: Path, out_path: Path, cancel_event=None) -> tuple[bool, str | None]:
+    return _convert_single_webp(webp_path, out_path, cancel_event=cancel_event)
+
 
 async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=None, reply_markup=None):
     webm_dir = work_dir / "telegram_emotes"
