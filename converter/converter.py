@@ -1,5 +1,6 @@
 import asyncio
 import re
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -41,6 +42,12 @@ _FRAME_RE = re.compile(
     r"(\d+)\s+"
     r"(\w+)"
 )
+
+
+def _im_cmd() -> list[str]:
+    if shutil.which("magick"):
+        return ["magick"]
+    return ["convert"]
 
 
 def _probe_webp(webp_path: Path) -> tuple[int, int, list[FrameMeta]]:
@@ -182,7 +189,47 @@ def _encode_png_sequence_to_webm(
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def _convert_single_webp(webp_path: Path, out_path: Path) -> tuple[bool, str | None]:
+def _render_webp_to_gif(webp_path: Path, gif_path: Path, target_size: int) -> None:
+    cmd = _im_cmd() + [
+        str(webp_path),
+        "-coalesce",
+        "-resize",
+        f"{target_size}x{target_size}",
+        str(gif_path),
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _encode_gif_to_webm(gif_path: Path, out_path: Path, crf: int, target_size: int) -> None:
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(gif_path),
+        "-vf",
+        (
+            f"fps=30,scale={target_size}:{target_size}:flags=lanczos:force_original_aspect_ratio=decrease,"
+            f"pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=0x00000000"
+        ),
+        "-frames:v",
+        "90",
+        "-an",
+        "-c:v",
+        "libvpx-vp9",
+        "-pix_fmt",
+        "yuva420p",
+        "-auto-alt-ref",
+        "0",
+        "-b:v",
+        "0",
+        "-crf",
+        str(crf),
+        str(out_path),
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _convert_single_webp_main(webp_path: Path, out_path: Path) -> tuple[bool, str | None]:
     last_reason = None
 
     for target_size in TARGET_SIZES:
@@ -219,7 +266,12 @@ def _convert_single_webp(webp_path: Path, out_path: Path) -> tuple[bool, str | N
                 crf += CRF_STEP
                 continue
             except (UnidentifiedImageError, OSError, ValueError) as exc:
-                return False, str(exc)
+                message = str(exc)
+                last_reason = message
+                if "animated WebP" in message:
+                    return False, message
+                crf += CRF_STEP
+                continue
 
             if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
                 return True, None
@@ -236,6 +288,67 @@ def _convert_single_webp(webp_path: Path, out_path: Path) -> tuple[bool, str | N
             crf += CRF_STEP
 
     return False, last_reason or "не удалось уложить WEBM в лимит"
+
+
+def _convert_single_webp_via_gif(webp_path: Path, out_path: Path) -> tuple[bool, str | None]:
+    last_reason = None
+
+    for target_size in TARGET_SIZES:
+        crf = CRF_START
+
+        while crf <= CRF_MAX:
+            if out_path.exists():
+                try:
+                    out_path.unlink()
+                except Exception:
+                    pass
+
+            try:
+                with tempfile.TemporaryDirectory(dir=webp_path.parent) as tmp:
+                    tmp_dir = Path(tmp)
+                    gif_path = tmp_dir / f"{webp_path.stem}.gif"
+                    _render_webp_to_gif(webp_path, gif_path, target_size)
+                    _encode_gif_to_webm(gif_path, out_path, crf, target_size)
+            except subprocess.TimeoutExpired:
+                last_reason = f"таймаут GIF fallback на размере {target_size}px, CRF {crf}"
+                crf += CRF_STEP
+                continue
+            except subprocess.CalledProcessError:
+                last_reason = f"ошибка GIF fallback на размере {target_size}px, CRF {crf}"
+                crf += CRF_STEP
+                continue
+            except (UnidentifiedImageError, OSError, ValueError) as exc:
+                last_reason = str(exc)
+                crf += CRF_STEP
+                continue
+
+            if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
+                return True, None
+
+            if out_path.exists():
+                try:
+                    out_path.unlink()
+                except Exception:
+                    pass
+
+            last_reason = (
+                f"GIF fallback: файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
+            )
+            crf += CRF_STEP
+
+    return False, last_reason or "GIF fallback не смог уложить WEBM в лимит"
+
+
+def _convert_single_webp(webp_path: Path, out_path: Path) -> tuple[bool, str | None]:
+    ok, reason = _convert_single_webp_main(webp_path, out_path)
+    if ok:
+        return True, None
+
+    gif_ok, gif_reason = _convert_single_webp_via_gif(webp_path, out_path)
+    if gif_ok:
+        return True, None
+
+    return False, gif_reason or reason or "не удалось конвертировать WEBP"
 
 
 async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=None, reply_markup=None):
@@ -271,8 +384,7 @@ async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=No
             skipped += 1
             skipped_items.append((name, reason or "неизвестная ошибка"))
             await status_msg.edit_text(
-                f"⚠️ Пропущен: {name}\nПричина: {reason or 'неизвестная ошибка'}\n"
-                f"Готово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {name}",
+                f"⚠️ Пропущен: {name}\nПричина: {reason or 'неизвестная ошибка'}\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {name}",
                 reply_markup=reply_markup,
             )
 
