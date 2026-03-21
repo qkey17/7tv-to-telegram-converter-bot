@@ -51,10 +51,12 @@ async def _edit_status(status_msg, text: str, active: bool = True):
 
 
 def _build_zip(webm_dir: Path, zip_path: Path, cancel_event: threading.Event | None = None) -> None:
+    # Important: do not stop packing already-created files when cancel is set.
+    # Cancel should affect the processing pipeline, but not make the partial archive empty.
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for f in sorted(webm_dir.glob("*.webm")):
-            if cancel_event is not None and cancel_event.is_set():
-                break
+            if not f.exists() or f.stat().st_size <= 0:
+                continue
             z.write(f, f.name)
 
 
