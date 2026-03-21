@@ -229,7 +229,7 @@ def _render_webp_to_png_sequence(
 
         for meta in frames:
             _check_cancel(cancel_event)
-            if elapsed_ms >= max_duration_ms:
+            if elapsed_ms + meta.duration_ms > max_duration_ms:
                 break
 
             patch_path = extract_dir / f"frame_{meta.index:03d}.webp"
@@ -285,8 +285,6 @@ def _encode_png_sequence_to_webm(
         f"{fps:.6f}",
         "-i",
         str(frame_dir / "frame_%03d.png"),
-        "-t",
-        "2.95",
         "-vf",
         _scale_filter(target_size),
         "-an",
