@@ -1,16 +1,42 @@
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
+MAX_WEBM_SIZE = 64 * 1024
+TARGET_FPS = 30
+TARGET_SIZE = 100
+CRF_START = 32
+CRF_STEP = 2
+CRF_MAX = 50
 
-def encode_webp(webp_path: Path, out_path: Path, crf: int):
+
+def _im_cmd() -> list[str]:
+    if shutil.which("magick"):
+        return ["magick"]
+    return ["convert"]
+
+
+def _render_webp_to_png_sequence(webp_path: Path, frame_dir: Path) -> None:
+    frame_pattern = frame_dir / "frame_%03d.png"
+    cmd = _im_cmd() + [
+        str(webp_path),
+        "-coalesce",
+        str(frame_pattern),
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _encode_png_sequence_to_webm(frame_dir: Path, out_path: Path, crf: int) -> None:
     cmd = [
         "ffmpeg",
         "-y",
-        "-i", str(webp_path),
+        "-framerate", str(TARGET_FPS),
+        "-i", str(frame_dir / "frame_%03d.png"),
         "-vf", (
-            "fps=30,"
-            "scale=100:100:flags=lanczos:force_original_aspect_ratio=decrease,"
-            "pad=100:100:(ow-iw)/2:(oh-ih)/2:color=0x00000000"
+            f"fps={TARGET_FPS},"
+            f"scale={TARGET_SIZE}:{TARGET_SIZE}:flags=lanczos:force_original_aspect_ratio=decrease,"
+            f"pad={TARGET_SIZE}:{TARGET_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000"
         ),
         "-frames:v", "90",
         "-an",
@@ -24,48 +50,55 @@ def encode_webp(webp_path: Path, out_path: Path, crf: int):
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _convert_single_webp(webp_path: Path, out_path: Path) -> bool:
+    crf = CRF_START
+
+    while crf <= CRF_MAX:
+        if out_path.exists():
+            try:
+                out_path.unlink()
+            except Exception:
+                pass
+
+        with tempfile.TemporaryDirectory(dir=webp_path.parent) as tmp:
+            frame_dir = Path(tmp)
+            _render_webp_to_png_sequence(webp_path, frame_dir)
+            _encode_png_sequence_to_webm(frame_dir, out_path, crf)
+
+        if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
+            return True
+
+        if out_path.exists():
+            try:
+                out_path.unlink()
+            except Exception:
+                pass
+
+        crf += CRF_STEP
+
+    return False
+
+
 async def convert_to_telegram_format(work_dir: Path, status_msg):
     webm_dir = work_dir / "telegram_emotes"
     webm_dir.mkdir(exist_ok=True)
 
-    webp_files = list(work_dir.glob("*.webp"))
+    webp_files = sorted(work_dir.glob("*.webp"))
     total = len(webp_files)
-    done = 0
 
-    crf = 32
-    while True:
-        for webp in webp_files:
-            out_path = webm_dir / (webp.stem + ".webm")
+    for index, webp in enumerate(webp_files, 1):
+        out_path = webm_dir / f"{webp.stem}.webm"
+        try:
+            _convert_single_webp(webp, out_path)
+        except subprocess.CalledProcessError:
             if out_path.exists():
-                continue
-            try:
-                encode_webp(webp, out_path, crf)
-            except subprocess.CalledProcessError:
-                if out_path.exists():
-                    try:
-                        out_path.unlink()
-                    except Exception:
-                        pass
-                continue
-
-            if out_path.stat().st_size > 64 * 1024:
                 try:
                     out_path.unlink()
                 except Exception:
                     pass
+            continue
 
-            done += 1
-            if done % 5 == 0 or done == total:
-                await status_msg.edit_text(f"🎬 Кодирование в WEBM: {done}/{total}")
-
-        missing = [
-            webp for webp in webp_files
-            if not (webm_dir / (webp.stem + ".webm")).exists()
-        ]
-
-        if not missing or crf > 50:
-            break
-
-        crf += 2
+        if index % 5 == 0 or index == total:
+            await status_msg.edit_text(f"🎬 Кодирование в WEBM: {index}/{total}")
 
     return webm_dir
