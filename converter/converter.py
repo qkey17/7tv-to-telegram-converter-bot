@@ -1,172 +1,85 @@
 import asyncio
-import re
 import subprocess
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
+
+try:
+    import webp
+except ModuleNotFoundError as exc:
+    raise ModuleNotFoundError(
+        "Не найден модуль webp. Установи его в venv: /opt/7tv-to-telegram-converter-bot/venv/bin/pip install webp"
+    ) from exc
 
 MAX_WEBM_SIZE = 64 * 1024
-TARGET_FRAME_DURATION_MS = 30
+MAX_OUTPUT_DURATION_MS = 2950
 TARGET_SIZES = (100, 96, 92, 88, 84)
 CRF_START = 32
 CRF_STEP = 2
 CRF_MAX = 60
 
 
-@dataclass(frozen=True)
-class FrameMeta:
-    index: int
-    width: int
-    height: int
-    x_offset: int
-    y_offset: int
-    duration_ms: int
-    dispose: str
-    blend: bool
-
-
-_CANVAS_RE = re.compile(r"Canvas size:\s*(\d+)\s*x\s*(\d+)")
-_FRAME_RE = re.compile(
-    r"^\s*(\d+):\s+"
-    r"(\d+)\s+"
-    r"(\d+)\s+"
-    r"(yes|no)\s+"
-    r"(-?\d+)\s+"
-    r"(-?\d+)\s+"
-    r"(\d+)\s+"
-    r"(\w+)\s+"
-    r"(yes|no)\s+"
-    r"(\d+)\s+"
-    r"(\w+)"
-)
-
-
-def _probe_webp(webp_path: Path) -> tuple[int, int, list[FrameMeta]]:
-    result = subprocess.run(
-        ["webpmux", "-info", str(webp_path)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    canvas_w = 0
-    canvas_h = 0
-    frames: list[FrameMeta] = []
-
-    for line in result.stdout.splitlines():
-        canvas_match = _CANVAS_RE.search(line)
-        if canvas_match:
-            canvas_w = int(canvas_match.group(1))
-            canvas_h = int(canvas_match.group(2))
-            continue
-
-        frame_match = _FRAME_RE.match(line)
-        if not frame_match:
-            continue
-
-        frames.append(
-            FrameMeta(
-                index=int(frame_match.group(1)),
-                width=int(frame_match.group(2)),
-                height=int(frame_match.group(3)),
-                x_offset=int(frame_match.group(5)),
-                y_offset=int(frame_match.group(6)),
-                duration_ms=max(1, int(frame_match.group(7))),
-                dispose=frame_match.group(8),
-                blend=frame_match.group(9) == "yes",
-            )
-        )
-
-    if canvas_w <= 0 or canvas_h <= 0 or not frames:
-        raise ValueError("Не удалось прочитать данные animated WebP.")
-
-    return canvas_w, canvas_h, frames
-
-
-def _extract_webp_frame(webp_path: Path, frame_index: int, out_path: Path) -> None:
-    subprocess.run(
-        [
-            "webpmux",
-            "-get",
-            "frame",
-            str(frame_index),
-            str(webp_path),
-            "-o",
-            str(out_path),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+def _escape_concat_path(path: Path) -> str:
+    return str(path).replace("'", r"'\''")
 
 
 def _render_webp_to_png_sequence(webp_path: Path, frame_dir: Path) -> list[int]:
-    canvas_w, canvas_h, frames = _probe_webp(webp_path)
-    durations: list[int] = []
+    with webp_path.open("rb") as f:
+        webp_data = webp.WebPData.from_buffer(f.read())
+        decoder = webp.WebPAnimDecoder.new(webp_data)
 
-    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        durations: list[int] = []
+        previous_timestamp = 0
+        frame_index = 0
 
-    with tempfile.TemporaryDirectory(dir=frame_dir) as extract_tmp:
-        extract_dir = Path(extract_tmp)
+        for arr, timestamp_ms in decoder.frames():
+            frame_index += 1
+            img = Image.fromarray(arr, "RGBA")
+            img.save(frame_dir / f"frame_{frame_index:03d}.png", format="PNG")
 
-        for meta in frames:
-            patch_path = extract_dir / f"frame_{meta.index:03d}.webp"
-            _extract_webp_frame(webp_path, meta.index, patch_path)
+            timestamp_ms = int(timestamp_ms)
+            duration_ms = max(1, timestamp_ms - previous_timestamp)
+            durations.append(duration_ms)
+            previous_timestamp = timestamp_ms
 
-            with Image.open(patch_path) as patch_image:
-                patch = patch_image.convert("RGBA")
-
-            current = canvas.copy()
-            clear_box = (
-                meta.x_offset,
-                meta.y_offset,
-                meta.x_offset + patch.width,
-                meta.y_offset + patch.height,
-            )
-
-            if not meta.blend:
-                current.paste((0, 0, 0, 0), clear_box)
-
-            current.paste(patch, (meta.x_offset, meta.y_offset), patch)
-
-            output_path = frame_dir / f"frame_{meta.index:03d}.png"
-            current.save(output_path, format="PNG")
-
-            durations.append(meta.duration_ms)
-            canvas = current
-
-            if meta.dispose == "background":
-                canvas.paste((0, 0, 0, 0), clear_box)
+    if not durations:
+        raise ValueError("Не удалось прочитать данные animated WebP.")
 
     return durations
 
 
-def _encode_png_sequence_to_webm(
-    frame_dir: Path,
-    out_path: Path,
-    crf: int,
-    frame_duration_ms: int,
-    target_size: int,
-) -> None:
-    fps = 1000 / frame_duration_ms
+def _write_concat_file(frame_dir: Path, durations: list[int], concat_path: Path) -> None:
+    with concat_path.open("w", encoding="utf-8") as f:
+        for index, duration_ms in enumerate(durations, 1):
+            frame_path = _escape_concat_path(frame_dir / f"frame_{index:03d}.png")
+            f.write(f"file '{frame_path}'\n")
+            f.write(f"duration {duration_ms / 1000:.6f}\n")
 
+        last_frame = _escape_concat_path(frame_dir / f"frame_{len(durations):03d}.png")
+        f.write(f"file '{last_frame}'\n")
+
+
+def _encode_png_sequence_to_webm(concat_path: Path, out_path: Path, crf: int, target_size: int) -> None:
     cmd = [
         "ffmpeg",
         "-y",
-        "-framerate",
-        f"{fps:.6f}",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
         "-i",
-        str(frame_dir / "frame_%03d.png"),
+        str(concat_path),
         "-t",
-        "2.95",
+        str(MAX_OUTPUT_DURATION_MS / 1000),
         "-vf",
         (
             f"scale={target_size}:{target_size}:flags=lanczos:force_original_aspect_ratio=decrease,"
             f"pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=0x00000000"
         ),
         "-an",
+        "-vsync",
+        "vfr",
         "-c:v",
         "libvpx-vp9",
         "-pix_fmt",
@@ -199,17 +112,9 @@ def _convert_single_webp(webp_path: Path, out_path: Path) -> tuple[bool, str | N
                 with tempfile.TemporaryDirectory(dir=webp_path.parent) as tmp:
                     frame_dir = Path(tmp)
                     durations = _render_webp_to_png_sequence(webp_path, frame_dir)
-                    if not durations:
-                        return False, "не удалось извлечь кадры"
-
-                    frame_duration_ms = durations[0] if durations else TARGET_FRAME_DURATION_MS
-                    _encode_png_sequence_to_webm(
-                        frame_dir,
-                        out_path,
-                        crf,
-                        frame_duration_ms,
-                        target_size,
-                    )
+                    concat_path = frame_dir / "frames.txt"
+                    _write_concat_file(frame_dir, durations, concat_path)
+                    _encode_png_sequence_to_webm(concat_path, out_path, crf, target_size)
             except subprocess.TimeoutExpired:
                 last_reason = f"таймаут на размере {target_size}px, CRF {crf}"
                 crf += CRF_STEP
@@ -218,7 +123,7 @@ def _convert_single_webp(webp_path: Path, out_path: Path) -> tuple[bool, str | N
                 last_reason = f"ошибка кодирования на размере {target_size}px, CRF {crf}"
                 crf += CRF_STEP
                 continue
-            except (UnidentifiedImageError, OSError, ValueError) as exc:
+            except (OSError, ValueError) as exc:
                 return False, str(exc)
 
             if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
@@ -248,19 +153,19 @@ async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=No
     skipped = 0
     skipped_items: list[tuple[str, str]] = []
 
-    for index, webp in enumerate(webp_files, 1):
+    for index, webp_file in enumerate(webp_files, 1):
         if cancel_event is not None and cancel_event.is_set():
             break
 
-        name = webp.stem
+        name = webp_file.stem
         await status_msg.edit_text(
             f"🎬 Конвертация в WEBM...\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {name}",
             reply_markup=reply_markup,
         )
 
-        out_path = webm_dir / f"{webp.stem}.webm"
+        out_path = webm_dir / f"{webp_file.stem}.webm"
         try:
-            ok, reason = await asyncio.to_thread(_convert_single_webp, webp, out_path)
+            ok, reason = await asyncio.to_thread(_convert_single_webp, webp_file, out_path)
         except Exception as exc:
             ok = False
             reason = f"неожиданная ошибка: {exc}"
@@ -271,8 +176,7 @@ async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=No
             skipped += 1
             skipped_items.append((name, reason or "неизвестная ошибка"))
             await status_msg.edit_text(
-                f"⚠️ Пропущен: {name}\nПричина: {reason or 'неизвестная ошибка'}\n"
-                f"Готово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {name}",
+                f"⚠️ Пропущен: {name}\nПричина: {reason or 'неизвестная ошибка'}\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {name}",
                 reply_markup=reply_markup,
             )
 
