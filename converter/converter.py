@@ -4,7 +4,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 MAX_WEBM_SIZE = 64 * 1024
 TARGET_FRAME_DURATION_MS = 30
