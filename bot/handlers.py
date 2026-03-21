@@ -1,7 +1,12 @@
+from __future__ import annotations
+
 import asyncio
 import shutil
 import threading
 import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -23,6 +28,17 @@ CANCEL_CALLBACK_DATA = "cancel_job"
 FINAL_SUMMARY_LIMIT = 20
 
 
+@dataclass
+class JobState:
+    kind: str
+    cancel_event: threading.Event
+    status_msg: Any
+    task: asyncio.Task | None = None
+
+
+_ACTIVE_JOBS: dict[int, JobState] = {}
+
+
 def cancel_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("ОТМЕНА", callback_data=CANCEL_CALLBACK_DATA)]])
 
@@ -34,7 +50,7 @@ async def _edit_status(status_msg, text: str, active: bool = True):
         pass
 
 
-def _build_zip(webm_dir, zip_path, cancel_event=None):
+def _build_zip(webm_dir: Path, zip_path: Path, cancel_event: threading.Event | None = None) -> None:
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for f in sorted(webm_dir.glob("*.webm")):
             if cancel_event is not None and cancel_event.is_set():
@@ -42,8 +58,14 @@ def _build_zip(webm_dir, zip_path, cancel_event=None):
             z.write(f, f.name)
 
 
-async def _send_zip_archive(update: Update, webm_dir, zip_path, filename: str, cancel_event=None) -> bool:
-    _build_zip(webm_dir, zip_path, cancel_event=cancel_event)
+async def _send_zip_archive(
+    update: Update,
+    webm_dir: Path,
+    zip_path: Path,
+    filename: str,
+    cancel_event: threading.Event | None = None,
+) -> bool:
+    await asyncio.to_thread(_build_zip, webm_dir, zip_path, cancel_event)
     if zip_path.exists() and zip_path.stat().st_size > 0:
         with zip_path.open("rb") as archive:
             await update.message.reply_document(archive, filename=filename)
@@ -71,8 +93,15 @@ def _format_summary(title: str, total: int, sent: int, skipped_items: list[tuple
     return "\n".join(lines)
 
 
+def _job_exists(chat_id: int) -> bool:
+    return chat_id in _ACTIVE_JOBS
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    if update.message is None:
+        return
+
+    text = (update.message.text or "").strip()
 
     set_id = extract_set_id(text)
     if set_id:
@@ -82,14 +111,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     emote_id = extract_emote_id(text)
     if emote_id:
         await handle_single_emote(update, context, emote_id)
-        return
 
 
 async def handle_emote_set(update: Update, context: ContextTypes.DEFAULT_TYPE, set_id: str):
-    cancel_event = threading.Event()
-    context.chat_data["cancel_event"] = cancel_event
+    chat_id = update.effective_chat.id if update.effective_chat else update.effective_user.id
+    if _job_exists(chat_id):
+        await update.message.reply_text("⏳ Уже идёт обработка. Сначала нажми ОТМЕНА.")
+        return
 
+    cancel_event = threading.Event()
     status_msg = await update.message.reply_text("⏳ Подготовка...", reply_markup=cancel_markup())
+    job = JobState(kind="set", cancel_event=cancel_event, status_msg=status_msg)
+    _ACTIVE_JOBS[chat_id] = job
+
+    task = asyncio.create_task(_process_emote_set_job(update, context, set_id, chat_id, job))
+    job.task = task
+
+
+async def handle_single_emote(update: Update, context: ContextTypes.DEFAULT_TYPE, emote_id: str):
+    chat_id = update.effective_chat.id if update.effective_chat else update.effective_user.id
+    if _job_exists(chat_id):
+        await update.message.reply_text("⏳ Уже идёт обработка. Сначала нажми ОТМЕНА.")
+        return
+
+    cancel_event = threading.Event()
+    status_msg = await update.message.reply_text("⏳ Подготовка...", reply_markup=cancel_markup())
+    job = JobState(kind="single", cancel_event=cancel_event, status_msg=status_msg)
+    _ACTIVE_JOBS[chat_id] = job
+
+    task = asyncio.create_task(_process_single_emote_job(update, context, emote_id, chat_id, job))
+    job.task = task
+
+
+async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_TYPE, set_id: str, chat_id: int, job: JobState):
+    status_msg = job.status_msg
+    cancel_event = job.cancel_event
     work_dir = SAVE_ROOT / set_id
     work_dir.mkdir(exist_ok=True)
     zip_path = SAVE_ROOT / f"{set_id}.zip"
@@ -98,7 +154,7 @@ async def handle_emote_set(update: Update, context: ContextTypes.DEFAULT_TYPE, s
     skipped_convert: list[tuple[str, str]] = []
 
     try:
-        data = fetch_emote_list(set_id)
+        data = await asyncio.to_thread(fetch_emote_list, set_id)
         if not data or "emotes" not in data:
             await _edit_status(status_msg, "Ошибка получения списка эмоутов.", active=False)
             return
@@ -216,8 +272,10 @@ async def handle_emote_set(update: Update, context: ContextTypes.DEFAULT_TYPE, s
             skipped_downloads + skipped_convert,
         )
         await _edit_status(status_msg, summary, active=False)
+    except Exception as exc:
+        await _edit_status(status_msg, f"Ошибка обработки: {exc}", active=False)
     finally:
-        context.chat_data.pop("cancel_event", None)
+        _ACTIVE_JOBS.pop(chat_id, None)
         try:
             shutil.rmtree(work_dir)
         except Exception:
@@ -228,18 +286,16 @@ async def handle_emote_set(update: Update, context: ContextTypes.DEFAULT_TYPE, s
             pass
 
 
-async def handle_single_emote(update: Update, context: ContextTypes.DEFAULT_TYPE, emote_id: str):
-    cancel_event = threading.Event()
-    context.chat_data["cancel_event"] = cancel_event
-
-    status_msg = await update.message.reply_text("⏳ Подготовка...", reply_markup=cancel_markup())
+async def _process_single_emote_job(update: Update, context: ContextTypes.DEFAULT_TYPE, emote_id: str, chat_id: int, job: JobState):
+    status_msg = job.status_msg
+    cancel_event = job.cancel_event
     work_dir = SAVE_ROOT / emote_id
     work_dir.mkdir(exist_ok=True)
     zip_path = SAVE_ROOT / f"{emote_id}.zip"
     skipped_items: list[tuple[str, str]] = []
 
     try:
-        payload = fetch_emote(emote_id)
+        payload = await asyncio.to_thread(fetch_emote, emote_id)
         emote = unwrap_emote(payload)
         if not emote:
             await _edit_status(status_msg, "Ошибка получения эмоута.", active=False)
@@ -321,8 +377,10 @@ async def handle_single_emote(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         summary = _format_summary("✅ Готово!", 1, converted, skipped_items)
         await _edit_status(status_msg, summary, active=False)
+    except Exception as exc:
+        await _edit_status(status_msg, f"Ошибка обработки: {exc}", active=False)
     finally:
-        context.chat_data.pop("cancel_event", None)
+        _ACTIVE_JOBS.pop(chat_id, None)
         try:
             shutil.rmtree(work_dir)
         except Exception:
@@ -338,13 +396,23 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query is None:
         return
 
-    await query.answer("Отмена запрошена")
-    cancel_event = context.chat_data.get("cancel_event")
-    if cancel_event is not None:
-        cancel_event.set()
+    await query.answer()
+    chat = query.message.chat if query.message else None
+    if chat is None:
+        return
+
+    job = _ACTIVE_JOBS.get(chat.id)
+    if job is None:
+        try:
+            await query.message.edit_text("⛔ Отмена недоступна: задача уже завершена.", reply_markup=None)
+        except Exception:
+            pass
+        return
+
+    job.cancel_event.set()
 
     try:
-        await query.message.edit_text("⛔ Отмена запрошена...")
+        await query.message.edit_text("⛔ Отмена запрошена...", reply_markup=None)
     except Exception:
         pass
 
