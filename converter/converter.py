@@ -29,7 +29,6 @@ def _encode_png_sequence_to_webm(frame_dir: Path, out_path: Path, crf: int) -> N
         "-vf",
         f"scale={TARGET_SIZE}:{TARGET_SIZE}:flags=lanczos:force_original_aspect_ratio=decrease,"
         f"pad={TARGET_SIZE}:{TARGET_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
-        "-frames:v", "90",
         "-an",
         "-c:v", "libvpx-vp9",
         "-pix_fmt", "yuva420p",
