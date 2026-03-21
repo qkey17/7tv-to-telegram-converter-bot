@@ -9,10 +9,10 @@ from PIL import Image, UnidentifiedImageError
 
 MAX_WEBM_SIZE = 64 * 1024
 TARGET_FRAME_DURATION_MS = 30
-TARGET_SIZE = 100
+TARGET_SIZES = (100, 96, 92, 88, 84)
 CRF_START = 32
 CRF_STEP = 2
-CRF_MAX = 50
+CRF_MAX = 60
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,6 @@ def _probe_webp(webp_path: Path) -> tuple[int, int, list[FrameMeta]]:
         check=True,
         capture_output=True,
         text=True,
-        timeout=20,
     )
 
     canvas_w = 0
@@ -100,7 +99,6 @@ def _extract_webp_frame(webp_path: Path, frame_index: int, out_path: Path) -> No
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        timeout=20,
     )
 
 
@@ -145,54 +143,86 @@ def _render_webp_to_png_sequence(webp_path: Path, frame_dir: Path) -> list[int]:
     return durations
 
 
-def _encode_png_sequence_to_webm(frame_dir: Path, out_path: Path, crf: int, frame_duration_ms: int) -> None:
+def _encode_png_sequence_to_webm(
+    frame_dir: Path,
+    out_path: Path,
+    crf: int,
+    frame_duration_ms: int,
+    target_size: int,
+) -> None:
     fps = 1000 / frame_duration_ms
 
     cmd = [
         "ffmpeg",
         "-y",
-        "-framerate", f"{fps:.6f}",
-        "-i", str(frame_dir / "frame_%03d.png"),
-        "-t", "2.95",
+        "-framerate",
+        f"{fps:.6f}",
+        "-i",
+        str(frame_dir / "frame_%03d.png"),
+        "-t",
+        "2.95",
         "-vf",
         (
-            f"scale={TARGET_SIZE}:{TARGET_SIZE}:flags=lanczos:force_original_aspect_ratio=decrease,"
-            f"pad={TARGET_SIZE}:{TARGET_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000"
+            f"scale={target_size}:{target_size}:flags=lanczos:force_original_aspect_ratio=decrease,"
+            f"pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=0x00000000"
         ),
         "-an",
-        "-c:v", "libvpx-vp9",
-        "-pix_fmt", "yuva420p",
-        "-auto-alt-ref", "0",
-        "-b:v", "0",
-        "-crf", str(crf),
+        "-c:v",
+        "libvpx-vp9",
+        "-pix_fmt",
+        "yuva420p",
+        "-auto-alt-ref",
+        "0",
+        "-b:v",
+        "0",
+        "-crf",
+        str(crf),
         str(out_path),
     ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90)
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def _convert_single_webp(webp_path: Path, out_path: Path, cancel_event=None) -> bool:
-    try:
+def _convert_single_webp(webp_path: Path, out_path: Path) -> tuple[bool, str | None]:
+    last_reason = None
+
+    for target_size in TARGET_SIZES:
         crf = CRF_START
-        while crf <= CRF_MAX:
-            if cancel_event is not None and cancel_event.is_set():
-                return False
 
+        while crf <= CRF_MAX:
             if out_path.exists():
                 try:
                     out_path.unlink()
                 except Exception:
                     pass
 
-            with tempfile.TemporaryDirectory(dir=webp_path.parent) as tmp:
-                frame_dir = Path(tmp)
-                durations = _render_webp_to_png_sequence(webp_path, frame_dir)
-                if cancel_event is not None and cancel_event.is_set():
-                    return False
-                frame_duration_ms = durations[0] if durations else TARGET_FRAME_DURATION_MS
-                _encode_png_sequence_to_webm(frame_dir, out_path, crf, frame_duration_ms)
+            try:
+                with tempfile.TemporaryDirectory(dir=webp_path.parent) as tmp:
+                    frame_dir = Path(tmp)
+                    durations = _render_webp_to_png_sequence(webp_path, frame_dir)
+                    if not durations:
+                        return False, "не удалось извлечь кадры"
+
+                    frame_duration_ms = durations[0] if durations else TARGET_FRAME_DURATION_MS
+                    _encode_png_sequence_to_webm(
+                        frame_dir,
+                        out_path,
+                        crf,
+                        frame_duration_ms,
+                        target_size,
+                    )
+            except subprocess.TimeoutExpired:
+                last_reason = f"таймаут на размере {target_size}px, CRF {crf}"
+                crf += CRF_STEP
+                continue
+            except subprocess.CalledProcessError:
+                last_reason = f"ошибка кодирования на размере {target_size}px, CRF {crf}"
+                crf += CRF_STEP
+                continue
+            except (UnidentifiedImageError, OSError, ValueError) as exc:
+                return False, str(exc)
 
             if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
-                return True
+                return True, None
 
             if out_path.exists():
                 try:
@@ -200,26 +230,15 @@ def _convert_single_webp(webp_path: Path, out_path: Path, cancel_event=None) -> 
                 except Exception:
                     pass
 
+            last_reason = (
+                f"файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
+            )
             crf += CRF_STEP
 
-        return False
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, UnidentifiedImageError, OSError, ValueError):
-        if out_path.exists():
-            try:
-                out_path.unlink()
-            except Exception:
-                pass
-        return False
-    except Exception:
-        if out_path.exists():
-            try:
-                out_path.unlink()
-            except Exception:
-                pass
-        return False
+    return False, last_reason or "не удалось уложить WEBM в лимит"
 
 
-async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=None, **_):
+async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=None, reply_markup=None):
     webm_dir = work_dir / "telegram_emotes"
     webm_dir.mkdir(exist_ok=True)
 
@@ -227,29 +246,40 @@ async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=No
     total = len(webp_files)
     converted = 0
     skipped = 0
-    cancelled = False
+    skipped_items: list[tuple[str, str]] = []
 
     for index, webp in enumerate(webp_files, 1):
         if cancel_event is not None and cancel_event.is_set():
-            cancelled = True
             break
 
-        out_path = webm_dir / f"{webp.stem}.webm"
+        name = webp.stem
         await status_msg.edit_text(
-            f"🎬 Конвертация в WEBM...\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {webp.stem}",
+            f"🎬 Конвертация в WEBM...\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {name}",
+            reply_markup=reply_markup,
         )
 
-        ok = await asyncio.to_thread(_convert_single_webp, webp, out_path, cancel_event)
+        out_path = webm_dir / f"{webp.stem}.webm"
+        try:
+            ok, reason = await asyncio.to_thread(_convert_single_webp, webp, out_path)
+        except Exception as exc:
+            ok = False
+            reason = f"неожиданная ошибка: {exc}"
+
         if ok:
             converted += 1
         else:
             skipped += 1
+            skipped_items.append((name, reason or "неизвестная ошибка"))
+            await status_msg.edit_text(
+                f"⚠️ Пропущен: {name}\nПричина: {reason or 'неизвестная ошибка'}\n"
+                f"Готово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {name}",
+                reply_markup=reply_markup,
+            )
 
-        await status_msg.edit_text(
-            f"🎬 Конвертация в WEBM...\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {webp.stem}",
-        )
+        if index % 5 == 0 or index == total:
+            await status_msg.edit_text(
+                f"🎬 Конвертация в WEBM...\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {name}",
+                reply_markup=reply_markup,
+            )
 
-    if cancel_event is not None and cancel_event.is_set():
-        cancelled = True
-
-    return webm_dir, cancelled, converted, skipped
+    return webm_dir, converted, skipped, skipped_items
