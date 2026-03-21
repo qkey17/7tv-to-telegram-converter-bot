@@ -1,7 +1,8 @@
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+
+from PIL import Image, ImageSequence
 
 MAX_WEBM_SIZE = 64 * 1024
 TARGET_FPS = 30
@@ -11,20 +12,11 @@ CRF_STEP = 2
 CRF_MAX = 50
 
 
-def _im_cmd() -> list[str]:
-    if shutil.which("magick"):
-        return ["magick"]
-    return ["convert"]
-
-
 def _render_webp_to_png_sequence(webp_path: Path, frame_dir: Path) -> None:
-    frame_pattern = frame_dir / "frame_%03d.png"
-    cmd = _im_cmd() + [
-        str(webp_path),
-        "-coalesce",
-        str(frame_pattern),
-    ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with Image.open(webp_path) as im:
+        for index, frame in enumerate(ImageSequence.Iterator(im), 1):
+            frame_path = frame_dir / f"frame_{index:03d}.png"
+            frame.convert("RGBA").save(frame_path, format="PNG")
 
 
 def _encode_png_sequence_to_webm(frame_dir: Path, out_path: Path, crf: int) -> None:
@@ -34,7 +26,9 @@ def _encode_png_sequence_to_webm(frame_dir: Path, out_path: Path, crf: int) -> N
         "-framerate", str(TARGET_FPS),
         "-i", str(frame_dir / "frame_%03d.png"),
         "-vf", (
-            f"fps={TARGET_FPS},scale={TARGET_SIZE}:{TARGET_SIZE}:flags=lanczos"
+            f"fps={TARGET_FPS},"
+            f"scale={TARGET_SIZE}:{TARGET_SIZE}:flags=lanczos:force_original_aspect_ratio=decrease,"
+            f"pad={TARGET_SIZE}:{TARGET_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000"
         ),
         "-frames:v", "90",
         "-an",
