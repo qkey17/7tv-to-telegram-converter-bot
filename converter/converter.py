@@ -148,26 +148,23 @@ def _encode_png_sequence_to_webm(frame_dir: Path, out_path: Path, crf: int, fram
     cmd = [
         "ffmpeg",
         "-y",
-        "-framerate",
-        f"{fps:.6f}",
-        "-i",
-        str(frame_dir / "frame_%03d.png"),
+        "-framerate", f"{fps:.6f}",
+        "-i", str(frame_dir / "frame_%03d.png"),
+
+        "-t", "3",  # лимит Telegram
+
         "-vf",
         (
             f"scale={TARGET_SIZE}:{TARGET_SIZE}:flags=lanczos:force_original_aspect_ratio=decrease,"
             f"pad={TARGET_SIZE}:{TARGET_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000"
         ),
+
         "-an",
-        "-c:v",
-        "libvpx-vp9",
-        "-pix_fmt",
-        "yuva420p",
-        "-auto-alt-ref",
-        "0",
-        "-b:v",
-        "0",
-        "-crf",
-        str(crf),
+        "-c:v", "libvpx-vp9",
+        "-pix_fmt", "yuva420p",
+        "-auto-alt-ref", "0",
+        "-b:v", "0",
+        "-crf", str(crf),
         str(out_path),
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
