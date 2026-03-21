@@ -1,0 +1,2 @@
+class ConversionCancelled(Exception):
+    pass

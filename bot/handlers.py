@@ -13,7 +13,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from config import CDN_BASE, SAVE_ROOT
-from converter.converter import ConversionCancelled, convert_to_telegram_format, convert_webp_to_webm
+from converter.converter import convert_to_telegram_format, convert_webp_to_webm
+from exceptions import ConversionCancelled
 from downloader.downloader import download_file
 from seven_tv.api import (
     extract_emote_id,
