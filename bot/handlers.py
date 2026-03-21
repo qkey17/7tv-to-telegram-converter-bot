@@ -14,13 +14,13 @@ from telegram.ext import ContextTypes
 
 from config import CDN_BASE, SAVE_ROOT
 from converter.converter import ConversionCancelled, convert_to_telegram_format, convert_webp_to_webm
+from seven_tv.api import get_best_file_info
 from downloader.downloader import download_file
 from seven_tv.api import (
     extract_emote_id,
     extract_set_id,
     fetch_emote,
     fetch_emote_list,
-    get_best_file,
     unwrap_emote,
 )
 from utils.filenames import safe_name
@@ -46,6 +46,7 @@ class EmoteTask:
     url: str
     webp_path: Path
     webm_path: Path
+    source_size: int = 0
 
 
 _ACTIVE_JOBS: dict[int, JobState] = {}
@@ -235,17 +236,27 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
             name = _unique_name(base_name, used_names, index)
             emote_id = emote_data.get("id")
             files = emote_data.get("host", {}).get("files", [])
-            best_file = get_best_file(files)
+            best_file = get_best_file_info(files)
 
             if not best_file or not emote_id:
                 skipped_download_count += 1
                 skipped_downloads.append((name, "нет WEBP-файла или id"))
                 continue
 
-            url = CDN_BASE.format(id=emote_id, file=best_file)
+            url = CDN_BASE.format(id=emote_id, file=best_file.get("name"))
             save_path = work_dir / f"{name}.webp"
             out_path = webm_dir / f"{name}.webm"
-            tasks.append(EmoteTask(name=name, url=url, webp_path=save_path, webm_path=out_path))
+            tasks.append(
+                EmoteTask(
+                    name=name,
+                    url=url,
+                    webp_path=save_path,
+                    webm_path=out_path,
+                    source_size=int(best_file.get("size", 0) or 0),
+                )
+            )
+
+        tasks.sort(key=lambda task: task.source_size)
 
         if not tasks and not cancel_event.is_set():
             skipped_items = skipped_downloads + skipped_convert
@@ -307,7 +318,7 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
                 await set_status(render_status("⚙️ Обработка эмоутов..."))
 
                 try:
-                    ok, reason = await asyncio.to_thread(convert_webp_to_webm, item.webp_path, item.webm_path, cancel_event)
+                    ok, reason = await asyncio.to_thread(convert_webp_to_webm, item.webp_path, item.webm_path, cancel_event, item.source_size)
                 except ConversionCancelled:
                     worker_state[worker_id] = "—"
                     if item.webp_path.exists():
@@ -399,7 +410,7 @@ async def _process_single_emote_job(update: Update, context: ContextTypes.DEFAUL
 
         name = safe_name(emote.get("name", emote_id))
         files = emote.get("host", {}).get("files", [])
-        best_file = get_best_file(files)
+        best_file = get_best_file_info(files)
 
         if not best_file:
             await _edit_status(status_msg, "У эмоута нет WEBP-файла.", active=False)
@@ -410,7 +421,7 @@ async def _process_single_emote_job(update: Update, context: ContextTypes.DEFAUL
             "📥 Скачивание эмоута...\nГотово: 0/1\nПропущено: 0\nТекущий: 1/1",
         )
 
-        url = CDN_BASE.format(id=emote_id, file=best_file)
+        url = CDN_BASE.format(id=emote_id, file=best_file.get("name"))
         save_path = work_dir / f"{name}.webp"
 
         download_ok = await asyncio.to_thread(download_file, url, save_path, cancel_event)

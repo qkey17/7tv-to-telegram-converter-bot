@@ -19,6 +19,9 @@ TARGET_SIZES = (100, 96, 92, 88, 84, 80)
 CRF_START = 32
 CRF_STEP = 2
 CRF_MAX = 60
+LIGHT_TARGET_SIZES = (100, 96, 92, 88, 84, 80)
+MEDIUM_TARGET_SIZES = (96, 92, 88, 84, 80, 76)
+HEAVY_TARGET_SIZES = (92, 88, 84, 80, 76, 72, 68)
 
 
 class ConversionCancelled(Exception):
@@ -62,6 +65,16 @@ def _im_cmd() -> list[str]:
 def _check_cancel(cancel_event=None):
     if cancel_event is not None and cancel_event.is_set():
         raise ConversionCancelled()
+
+
+def _select_profile(source_size: int | None) -> tuple[tuple[int, ...], int, int]:
+    if source_size is None:
+        return LIGHT_TARGET_SIZES, CRF_START, 4
+    if source_size >= 180_000:
+        return HEAVY_TARGET_SIZES, 40, 6
+    if source_size >= 110_000:
+        return MEDIUM_TARGET_SIZES, 36, 5
+    return LIGHT_TARGET_SIZES, CRF_START, 4
 
 
 def _terminate_process(proc: subprocess.Popen) -> None:
@@ -192,9 +205,15 @@ def _extract_webp_frame(webp_path: Path, frame_index: int, out_path: Path, cance
     )
 
 
-def _render_webp_to_png_sequence(webp_path: Path, frame_dir: Path, cancel_event=None) -> list[int]:
+def _render_webp_to_png_sequence(
+    webp_path: Path,
+    frame_dir: Path,
+    cancel_event=None,
+    max_duration_ms: int = 2950,
+) -> list[int]:
     canvas_w, canvas_h, frames = _probe_webp(webp_path, cancel_event=cancel_event)
     durations: list[int] = []
+    elapsed_ms = 0
 
     canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
 
@@ -203,6 +222,9 @@ def _render_webp_to_png_sequence(webp_path: Path, frame_dir: Path, cancel_event=
 
         for meta in frames:
             _check_cancel(cancel_event)
+            if elapsed_ms >= max_duration_ms:
+                break
+
             patch_path = extract_dir / f"frame_{meta.index:03d}.webp"
             _extract_webp_frame(webp_path, meta.index, patch_path, cancel_event=cancel_event)
 
@@ -226,6 +248,7 @@ def _render_webp_to_png_sequence(webp_path: Path, frame_dir: Path, cancel_event=
             current.save(output_path, format="PNG")
 
             durations.append(meta.duration_ms)
+            elapsed_ms += meta.duration_ms
             canvas = current
 
             if meta.dispose == "background":
@@ -242,6 +265,7 @@ def _encode_png_sequence_to_webm(
     frame_duration_ms: int,
     target_size: int,
     cancel_event=None,
+    cpu_used: int = 4,
 ) -> None:
     fps = 1000 / frame_duration_ms
 
@@ -265,7 +289,7 @@ def _encode_png_sequence_to_webm(
         "-c:v",
         "libvpx-vp9",
         "-cpu-used",
-        "4",
+        str(cpu_used),
         "-row-mt",
         "1",
         "-pix_fmt",
@@ -290,7 +314,7 @@ def _render_webp_to_gif(webp_path: Path, gif_path: Path, cancel_event=None) -> N
     _run_subprocess(cmd, cancel_event=cancel_event)
 
 
-def _encode_gif_to_webm(gif_path: Path, out_path: Path, crf: int, target_size: int, cancel_event=None) -> None:
+def _encode_gif_to_webm(gif_path: Path, out_path: Path, crf: int, target_size: int, cancel_event=None, cpu_used: int = 4) -> None:
     cmd = [
         "ffmpeg",
         "-y",
@@ -320,12 +344,18 @@ def _encode_gif_to_webm(gif_path: Path, out_path: Path, crf: int, target_size: i
 
 
 
-def _convert_single_webp_main(webp_path: Path, out_path: Path, cancel_event=None) -> tuple[bool, str | None]:
+def _convert_single_webp_main(
+    webp_path: Path,
+    out_path: Path,
+    cancel_event=None,
+    source_size: int | None = None,
+) -> tuple[bool, str | None]:
     last_reason = None
+    target_sizes, crf_start, cpu_used = _select_profile(source_size)
 
-    for target_size in TARGET_SIZES:
+    for target_size in target_sizes:
         _check_cancel(cancel_event)
-        crf = CRF_START
+        crf = crf_start
 
         if out_path.exists():
             try:
@@ -359,6 +389,7 @@ def _convert_single_webp_main(webp_path: Path, out_path: Path, cancel_event=None
                             frame_duration_ms,
                             target_size,
                             cancel_event=cancel_event,
+                            cpu_used=cpu_used,
                         )
                     except subprocess.TimeoutExpired:
                         last_reason = f"таймаут на размере {target_size}px, CRF {crf}"
@@ -400,12 +431,18 @@ def _convert_single_webp_main(webp_path: Path, out_path: Path, cancel_event=None
 
 
 
-def _convert_single_webp_via_gif(webp_path: Path, out_path: Path, cancel_event=None) -> tuple[bool, str | None]:
+def _convert_single_webp_via_gif(
+    webp_path: Path,
+    out_path: Path,
+    cancel_event=None,
+    source_size: int | None = None,
+) -> tuple[bool, str | None]:
     last_reason = None
+    target_sizes, crf_start, cpu_used = _select_profile(source_size)
 
-    for target_size in TARGET_SIZES:
+    for target_size in target_sizes:
         _check_cancel(cancel_event)
-        crf = CRF_START
+        crf = crf_start
 
         if out_path.exists():
             try:
@@ -429,7 +466,7 @@ def _convert_single_webp_via_gif(webp_path: Path, out_path: Path, cancel_event=N
                             pass
 
                     try:
-                        _encode_gif_to_webm(gif_path, out_path, crf, target_size, cancel_event=cancel_event)
+                        _encode_gif_to_webm(gif_path, out_path, crf, target_size, cancel_event=cancel_event, cpu_used=cpu_used)
                     except subprocess.TimeoutExpired:
                         last_reason = f"таймаут GIF fallback на размере {target_size}px, CRF {crf}"
                         crf += CRF_STEP
@@ -466,19 +503,24 @@ def _convert_single_webp_via_gif(webp_path: Path, out_path: Path, cancel_event=N
     return False, last_reason or "GIF fallback не смог уложить WEBM в лимит"
 
 
-def _convert_single_webp(webp_path: Path, out_path: Path, cancel_event=None) -> tuple[bool, str | None]:
-    ok, reason = _convert_single_webp_main(webp_path, out_path, cancel_event=cancel_event)
+def _convert_single_webp(
+    webp_path: Path,
+    out_path: Path,
+    cancel_event=None,
+    source_size: int | None = None,
+) -> tuple[bool, str | None]:
+    ok, reason = _convert_single_webp_main(webp_path, out_path, cancel_event=cancel_event, source_size=source_size)
     if ok:
         return True, None
 
-    gif_ok, gif_reason = _convert_single_webp_via_gif(webp_path, out_path, cancel_event=cancel_event)
+    gif_ok, gif_reason = _convert_single_webp_via_gif(webp_path, out_path, cancel_event=cancel_event, source_size=source_size)
     if gif_ok:
         return True, None
 
     return False, gif_reason or reason or "не удалось конвертировать WEBP"
 
-def convert_webp_to_webm(webp_path: Path, out_path: Path, cancel_event=None) -> tuple[bool, str | None]:
-    return _convert_single_webp(webp_path, out_path, cancel_event=cancel_event)
+def convert_webp_to_webm(webp_path: Path, out_path: Path, cancel_event=None, source_size: int | None = None) -> tuple[bool, str | None]:
+    return _convert_single_webp(webp_path, out_path, cancel_event=cancel_event, source_size=source_size)
 
 
 async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=None, reply_markup=None):
@@ -503,7 +545,8 @@ async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=No
 
         out_path = webm_dir / f"{webp.stem}.webm"
         try:
-            ok, reason = await asyncio.to_thread(_convert_single_webp, webp, out_path, cancel_event)
+            source_size = webp.stat().st_size if webp.exists() else None
+            ok, reason = await asyncio.to_thread(_convert_single_webp, webp, out_path, cancel_event, source_size)
         except ConversionCancelled:
             break
         except Exception as exc:

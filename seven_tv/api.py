@@ -37,12 +37,16 @@ def fetch_emote(emote_id: str):
     return None
 
 
-def get_best_file(files):
+def get_best_file_info(files):
     webp_files = [f for f in files if f.get("format") == "WEBP"]
     if not webp_files:
         return None
-    best = max(webp_files, key=lambda x: x.get("size", 0))
-    return best.get("name")
+    return max(webp_files, key=lambda x: x.get("size", 0))
+
+
+def get_best_file(files):
+    best = get_best_file_info(files)
+    return best.get("name") if best else None
 
 
 def unwrap_emote(payload):
