@@ -15,11 +15,14 @@ from PIL import Image, UnidentifiedImageError
 
 MAX_WEBM_SIZE = 64 * 1024
 TARGET_FRAME_DURATION_MS = 30
-TARGET_SIZES = (100, 96, 92, 88, 84, 80)
+TARGET_SIZES = (100, 96, 92, 88, 84)
 CRF_START = 32
 CRF_STEP = 2
 CRF_MAX = 60
 
+
+class ConversionCancelled(Exception):
+    pass
 
 
 @dataclass(frozen=True)
@@ -58,7 +61,7 @@ def _im_cmd() -> list[str]:
 
 def _check_cancel(cancel_event=None):
     if cancel_event is not None and cancel_event.is_set():
-        raise asyncio.CancelledError()
+        raise ConversionCancelled()
 
 
 def _terminate_process(proc: subprocess.Popen) -> None:
@@ -231,7 +234,6 @@ def _render_webp_to_png_sequence(webp_path: Path, frame_dir: Path, cancel_event=
     return durations
 
 
-
 def _encode_png_sequence_to_webm(
     frame_dir: Path,
     out_path: Path,
@@ -245,8 +247,6 @@ def _encode_png_sequence_to_webm(
     cmd = [
         "ffmpeg",
         "-y",
-        "-threads",
-        "1",
         "-framerate",
         f"{fps:.6f}",
         "-i",
@@ -261,10 +261,6 @@ def _encode_png_sequence_to_webm(
         "-an",
         "-c:v",
         "libvpx-vp9",
-        "-cpu-used",
-        "4",
-        "-row-mt",
-        "1",
         "-pix_fmt",
         "yuva420p",
         "-auto-alt-ref",
@@ -278,10 +274,12 @@ def _encode_png_sequence_to_webm(
     _run_subprocess(cmd, cancel_event=cancel_event)
 
 
-def _render_webp_to_gif(webp_path: Path, gif_path: Path, cancel_event=None) -> None:
+def _render_webp_to_gif(webp_path: Path, gif_path: Path, target_size: int, cancel_event=None) -> None:
     cmd = _im_cmd() + [
         str(webp_path),
         "-coalesce",
+        "-resize",
+        f"{target_size}x{target_size}",
         str(gif_path),
     ]
     _run_subprocess(cmd, cancel_event=cancel_event)
@@ -316,7 +314,6 @@ def _encode_gif_to_webm(gif_path: Path, out_path: Path, crf: int, target_size: i
     _run_subprocess(cmd, cancel_event=cancel_event)
 
 
-
 def _convert_single_webp_main(webp_path: Path, out_path: Path, cancel_event=None) -> tuple[bool, str | None]:
     last_reason = None
 
@@ -324,77 +321,62 @@ def _convert_single_webp_main(webp_path: Path, out_path: Path, cancel_event=None
         _check_cancel(cancel_event)
         crf = CRF_START
 
-        if out_path.exists():
+        while crf <= CRF_MAX:
+            _check_cancel(cancel_event)
+
+            if out_path.exists():
+                try:
+                    out_path.unlink()
+                except Exception:
+                    pass
+
             try:
-                out_path.unlink()
-            except Exception:
-                pass
+                with tempfile.TemporaryDirectory(dir=webp_path.parent) as tmp:
+                    frame_dir = Path(tmp)
+                    durations = _render_webp_to_png_sequence(webp_path, frame_dir, cancel_event=cancel_event)
+                    if not durations:
+                        return False, "не удалось извлечь кадры"
 
-        try:
-            with tempfile.TemporaryDirectory(dir=webp_path.parent) as tmp:
-                frame_dir = Path(tmp)
-                durations = _render_webp_to_png_sequence(webp_path, frame_dir, cancel_event=cancel_event)
-                if not durations:
-                    return False, "не удалось извлечь кадры"
+                    frame_duration_ms = durations[0] if durations else TARGET_FRAME_DURATION_MS
+                    _encode_png_sequence_to_webm(
+                        frame_dir,
+                        out_path,
+                        crf,
+                        frame_duration_ms,
+                        target_size,
+                        cancel_event=cancel_event,
+                    )
+            except ConversionCancelled:
+                raise
+            except subprocess.TimeoutExpired:
+                last_reason = f"таймаут на размере {target_size}px, CRF {crf}"
+                crf += CRF_STEP
+                continue
+            except subprocess.CalledProcessError:
+                last_reason = f"ошибка кодирования на размере {target_size}px, CRF {crf}"
+                crf += CRF_STEP
+                continue
+            except (UnidentifiedImageError, OSError, ValueError) as exc:
+                message = str(exc)
+                last_reason = message
+                if "animated WebP" in message:
+                    return False, message
+                crf += CRF_STEP
+                continue
 
-                frame_duration_ms = durations[0] if durations else TARGET_FRAME_DURATION_MS
+            if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
+                return True, None
 
-                while crf <= CRF_MAX:
-                    _check_cancel(cancel_event)
+            if out_path.exists():
+                try:
+                    out_path.unlink()
+                except Exception:
+                    pass
 
-                    if out_path.exists():
-                        try:
-                            out_path.unlink()
-                        except Exception:
-                            pass
-
-                    try:
-                        _encode_png_sequence_to_webm(
-                            frame_dir,
-                            out_path,
-                            crf,
-                            frame_duration_ms,
-                            target_size,
-                            cancel_event=cancel_event,
-                        )
-                    except subprocess.TimeoutExpired:
-                        last_reason = f"таймаут на размере {target_size}px, CRF {crf}"
-                        crf += CRF_STEP
-                        continue
-                    except subprocess.CalledProcessError:
-                        last_reason = f"ошибка кодирования на размере {target_size}px, CRF {crf}"
-                        crf += CRF_STEP
-                        continue
-
-                    if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
-                        return True, None
-
-                    if out_path.exists():
-                        try:
-                            out_path.unlink()
-                        except Exception:
-                            pass
-
-                    last_reason = f"файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
-                    crf += CRF_STEP
-
-        except asyncio.CancelledError:
-            raise
-        except subprocess.TimeoutExpired:
-            last_reason = f"таймаут на размере {target_size}px, CRF {crf}"
-            continue
-        except subprocess.CalledProcessError:
-            last_reason = f"ошибка кодирования на размере {target_size}px, CRF {crf}"
-            continue
-        except (UnidentifiedImageError, OSError, ValueError) as exc:
-            message = str(exc)
-            last_reason = message
-            if "animated WebP" in message:
-                return False, message
-            continue
+            last_reason = f"файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
+            crf += CRF_STEP
 
     return False, last_reason or "не удалось уложить WEBM в лимит"
-
 
 
 def _convert_single_webp_via_gif(webp_path: Path, out_path: Path, cancel_event=None) -> tuple[bool, str | None]:
@@ -404,61 +386,47 @@ def _convert_single_webp_via_gif(webp_path: Path, out_path: Path, cancel_event=N
         _check_cancel(cancel_event)
         crf = CRF_START
 
-        if out_path.exists():
+        while crf <= CRF_MAX:
+            _check_cancel(cancel_event)
+
+            if out_path.exists():
+                try:
+                    out_path.unlink()
+                except Exception:
+                    pass
+
             try:
-                out_path.unlink()
-            except Exception:
-                pass
+                with tempfile.TemporaryDirectory(dir=webp_path.parent) as tmp:
+                    tmp_dir = Path(tmp)
+                    gif_path = tmp_dir / f"{webp_path.stem}.gif"
+                    _render_webp_to_gif(webp_path, gif_path, target_size, cancel_event=cancel_event)
+                    _encode_gif_to_webm(gif_path, out_path, crf, target_size, cancel_event=cancel_event)
+            except ConversionCancelled:
+                raise
+            except subprocess.TimeoutExpired:
+                last_reason = f"таймаут GIF fallback на размере {target_size}px, CRF {crf}"
+                crf += CRF_STEP
+                continue
+            except subprocess.CalledProcessError:
+                last_reason = f"ошибка GIF fallback на размере {target_size}px, CRF {crf}"
+                crf += CRF_STEP
+                continue
+            except (UnidentifiedImageError, OSError, ValueError) as exc:
+                last_reason = str(exc)
+                crf += CRF_STEP
+                continue
 
-        try:
-            with tempfile.TemporaryDirectory(dir=webp_path.parent) as tmp:
-                tmp_dir = Path(tmp)
-                gif_path = tmp_dir / f"{webp_path.stem}.gif"
-                _render_webp_to_gif(webp_path, gif_path, cancel_event=cancel_event)
+            if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
+                return True, None
 
-                while crf <= CRF_MAX:
-                    _check_cancel(cancel_event)
+            if out_path.exists():
+                try:
+                    out_path.unlink()
+                except Exception:
+                    pass
 
-                    if out_path.exists():
-                        try:
-                            out_path.unlink()
-                        except Exception:
-                            pass
-
-                    try:
-                        _encode_gif_to_webm(gif_path, out_path, crf, target_size, cancel_event=cancel_event)
-                    except subprocess.TimeoutExpired:
-                        last_reason = f"таймаут GIF fallback на размере {target_size}px, CRF {crf}"
-                        crf += CRF_STEP
-                        continue
-                    except subprocess.CalledProcessError:
-                        last_reason = f"ошибка GIF fallback на размере {target_size}px, CRF {crf}"
-                        crf += CRF_STEP
-                        continue
-
-                    if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
-                        return True, None
-
-                    if out_path.exists():
-                        try:
-                            out_path.unlink()
-                        except Exception:
-                            pass
-
-                    last_reason = f"GIF fallback: файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
-                    crf += CRF_STEP
-
-        except asyncio.CancelledError:
-            raise
-        except subprocess.TimeoutExpired:
-            last_reason = f"таймаут GIF fallback на размере {target_size}px, CRF {crf}"
-            continue
-        except subprocess.CalledProcessError:
-            last_reason = f"ошибка GIF fallback на размере {target_size}px, CRF {crf}"
-            continue
-        except (UnidentifiedImageError, OSError, ValueError) as exc:
-            last_reason = str(exc)
-            continue
+            last_reason = f"GIF fallback: файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
+            crf += CRF_STEP
 
     return False, last_reason or "GIF fallback не смог уложить WEBM в лимит"
 
@@ -473,9 +441,6 @@ def _convert_single_webp(webp_path: Path, out_path: Path, cancel_event=None) -> 
         return True, None
 
     return False, gif_reason or reason or "не удалось конвертировать WEBP"
-
-def convert_webp_to_webm(webp_path: Path, out_path: Path, cancel_event=None) -> tuple[bool, str | None]:
-    return _convert_single_webp(webp_path, out_path, cancel_event=cancel_event)
 
 
 async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=None, reply_markup=None):
@@ -501,7 +466,7 @@ async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=No
         out_path = webm_dir / f"{webp.stem}.webm"
         try:
             ok, reason = await asyncio.to_thread(_convert_single_webp, webp, out_path, cancel_event)
-        except asyncio.CancelledError:
+        except ConversionCancelled:
             break
         except Exception as exc:
             ok = False

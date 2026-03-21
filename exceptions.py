@@ -1,2 +1,0 @@
-class ConversionCancelled(Exception):
-    pass
