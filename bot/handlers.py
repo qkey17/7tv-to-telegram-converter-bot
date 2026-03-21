@@ -68,7 +68,7 @@ async def handle_emote_set(update: Update, set_id: str):
             if done % 5 == 0 or done == total:
                 await status_msg.edit_text(f"📥 Скачивание эмоутов: {done}/{total}")
 
-        await status_msg.edit_text(f"⚙️ Скачано {done}/{total}\n🎞 Конвертация в GIF...")
+        await status_msg.edit_text(f"⚙️ Скачано {done}/{total}\n🎬 Конвертация в WEBM...")
 
         webm_dir = await convert_to_telegram_format(work_dir, status_msg)
 
@@ -121,7 +121,7 @@ async def handle_single_emote(update: Update, emote_id: str):
             await update.message.reply_text("Не удалось скачать эмоут.")
             return
 
-        await status_msg.edit_text("🎞 Конвертация...")
+        await status_msg.edit_text("🎬 Конвертация в WEBM...")
 
         webm_dir = await convert_to_telegram_format(work_dir, status_msg)
         webm_files = sorted(webm_dir.glob("*.webm"))
