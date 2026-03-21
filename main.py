@@ -1,8 +1,8 @@
 from telegram import BotCommand
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 
 from config import BOT_TOKEN
-from bot.handlers import handle_message, about_command
+from bot.handlers import handle_message, about_command, handle_cancel, CANCEL_CALLBACK_DATA
 
 
 # === Установка команд (меню в Telegram) ===
@@ -21,8 +21,9 @@ def main():
         .build()
     )
 
-    # === Регистрация команд ===
+    # === Регистрация команд и callback-кнопки ===
     app.add_handler(CommandHandler("about", about_command))
+    app.add_handler(CallbackQueryHandler(handle_cancel, pattern=f"^{CANCEL_CALLBACK_DATA}$"))
 
     # === Обработка обычных сообщений ===
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
