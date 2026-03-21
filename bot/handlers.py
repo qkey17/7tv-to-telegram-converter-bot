@@ -146,6 +146,7 @@ async def handle_emote_set(update: Update, context: ContextTypes.DEFAULT_TYPE, s
             return
 
         await _edit_status(status_msg, f"📦 Упаковываю архив...\nWEBM: {converted}\nПропущено: {skipped_convert}")
+        await _edit_status(status_msg, "📤 Отправляю архив...")
         sent = await _send_zip_archive(update, webm_dir, zip_path, f"{set_id}.zip")
         if not sent:
             await _edit_status(status_msg, "Не удалось собрать итоговый файл.", active=False)
@@ -233,6 +234,8 @@ async def handle_single_emote(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _edit_status(status_msg, "Не удалось собрать итоговый файл.", active=False)
             return
 
+        await _edit_status(status_msg, f"📦 WEBM: {converted}\nПропущено: {skipped_convert}")
+        await _edit_status(status_msg, "📤 Отправляю WEBM...")
         result_file = webm_files[0]
         with result_file.open("rb") as f:
             await update.message.reply_document(f, filename=result_file.name)

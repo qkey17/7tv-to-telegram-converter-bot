@@ -1,3 +1,4 @@
+import asyncio
 import re
 import subprocess
 import tempfile
@@ -48,6 +49,7 @@ def _probe_webp(webp_path: Path) -> tuple[int, int, list[FrameMeta]]:
         check=True,
         capture_output=True,
         text=True,
+        timeout=20,
     )
 
     canvas_w = 0
@@ -98,6 +100,7 @@ def _extract_webp_frame(webp_path: Path, frame_index: int, out_path: Path) -> No
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        timeout=20,
     )
 
 
@@ -150,15 +153,12 @@ def _encode_png_sequence_to_webm(frame_dir: Path, out_path: Path, crf: int, fram
         "-y",
         "-framerate", f"{fps:.6f}",
         "-i", str(frame_dir / "frame_%03d.png"),
-
-        "-t", "2.95",  # лимит Telegram
-
+        "-t", "2.95",
         "-vf",
         (
             f"scale={TARGET_SIZE}:{TARGET_SIZE}:flags=lanczos:force_original_aspect_ratio=decrease,"
             f"pad={TARGET_SIZE}:{TARGET_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000"
         ),
-
         "-an",
         "-c:v", "libvpx-vp9",
         "-pix_fmt", "yuva420p",
@@ -167,59 +167,89 @@ def _encode_png_sequence_to_webm(frame_dir: Path, out_path: Path, crf: int, fram
         "-crf", str(crf),
         str(out_path),
     ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90)
 
 
-def _convert_single_webp(webp_path: Path, out_path: Path) -> bool:
-    crf = CRF_START
+def _convert_single_webp(webp_path: Path, out_path: Path, cancel_event=None) -> bool:
+    try:
+        crf = CRF_START
+        while crf <= CRF_MAX:
+            if cancel_event is not None and cancel_event.is_set():
+                return False
 
-    while crf <= CRF_MAX:
-        if out_path.exists():
-            try:
-                out_path.unlink()
-            except Exception:
-                pass
-
-        with tempfile.TemporaryDirectory(dir=webp_path.parent) as tmp:
-            frame_dir = Path(tmp)
-            durations = _render_webp_to_png_sequence(webp_path, frame_dir)
-            frame_duration_ms = durations[0] if durations else TARGET_FRAME_DURATION_MS
-            _encode_png_sequence_to_webm(frame_dir, out_path, crf, frame_duration_ms)
-
-        if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
-            return True
-
-        if out_path.exists():
-            try:
-                out_path.unlink()
-            except Exception:
-                pass
-
-        crf += CRF_STEP
-
-    return False
-
-
-async def convert_to_telegram_format(work_dir: Path, status_msg):
-    webm_dir = work_dir / "telegram_emotes"
-    webm_dir.mkdir(exist_ok=True)
-
-    webp_files = sorted(work_dir.glob("*.webp"))
-    total = len(webp_files)
-
-    for index, webp in enumerate(webp_files, 1):
-        out_path = webm_dir / f"{webp.stem}.webm"
-        try:
-            _convert_single_webp(webp, out_path)
-        except subprocess.CalledProcessError:
             if out_path.exists():
                 try:
                     out_path.unlink()
                 except Exception:
                     pass
-            continue
 
-        if index % 5 == 0 or index == total:
-            await status_msg.edit_text(f"🎬 Кодирование в WEBM: {index}/{total}")
+            with tempfile.TemporaryDirectory(dir=webp_path.parent) as tmp:
+                frame_dir = Path(tmp)
+                durations = _render_webp_to_png_sequence(webp_path, frame_dir)
+                if cancel_event is not None and cancel_event.is_set():
+                    return False
+                frame_duration_ms = durations[0] if durations else TARGET_FRAME_DURATION_MS
+                _encode_png_sequence_to_webm(frame_dir, out_path, crf, frame_duration_ms)
 
-    return webm_dir
+            if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
+                return True
+
+            if out_path.exists():
+                try:
+                    out_path.unlink()
+                except Exception:
+                    pass
+
+            crf += CRF_STEP
+
+        return False
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, UnidentifiedImageError, OSError, ValueError):
+        if out_path.exists():
+            try:
+                out_path.unlink()
+            except Exception:
+                pass
+        return False
+    except Exception:
+        if out_path.exists():
+            try:
+                out_path.unlink()
+            except Exception:
+                pass
+        return False
+
+
+async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=None, **_):
+    webm_dir = work_dir / "telegram_emotes"
+    webm_dir.mkdir(exist_ok=True)
+
+    webp_files = sorted(work_dir.glob("*.webp"))
+    total = len(webp_files)
+    converted = 0
+    skipped = 0
+    cancelled = False
+
+    for index, webp in enumerate(webp_files, 1):
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
+            break
+
+        out_path = webm_dir / f"{webp.stem}.webm"
+        await status_msg.edit_text(
+            f"🎬 Конвертация в WEBM...\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {webp.stem}",
+        )
+
+        ok = await asyncio.to_thread(_convert_single_webp, webp, out_path, cancel_event)
+        if ok:
+            converted += 1
+        else:
+            skipped += 1
+
+        await status_msg.edit_text(
+            f"🎬 Конвертация в WEBM...\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {webp.stem}",
+        )
+
+    if cancel_event is not None and cancel_event.is_set():
+        cancelled = True
+
+    return webm_dir, cancelled, converted, skipped

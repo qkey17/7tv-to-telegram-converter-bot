@@ -1,11 +1,10 @@
 from telegram import BotCommand
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters
+from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
+from bot.handlers import about_command, handle_cancel, handle_message, CANCEL_CALLBACK_DATA
 from config import BOT_TOKEN
-from bot.handlers import handle_message, about_command
 
 
-# === Установка команд (меню в Telegram) ===
 async def post_init(app):
     await app.bot.set_my_commands([
         BotCommand("about", "О боте"),
@@ -13,7 +12,6 @@ async def post_init(app):
 
 
 def main():
-    # === Инициализация приложения ===
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
@@ -21,13 +19,10 @@ def main():
         .build()
     )
 
-    # === Регистрация команд ===
     app.add_handler(CommandHandler("about", about_command))
-
-    # === Обработка обычных сообщений ===
+    app.add_handler(CallbackQueryHandler(handle_cancel, pattern=f"^{CANCEL_CALLBACK_DATA}$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # === Запуск бота ===
     print("Bot started")
     app.run_polling(drop_pending_updates=True)
 
