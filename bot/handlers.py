@@ -113,12 +113,12 @@ def _format_summary(title: str, total: int, sent: int, skipped_items: list[tuple
         title,
         f"Всего: {total}",
         f"Отправлено: {sent}",
-        f"Пропущено: {len(skipped_items)}",
+        f"Ошибки: {len(skipped_items)}",
     ]
 
     if skipped_items:
         lines.append("")
-        lines.append("Пропущенные:")
+        lines.append("Ошибки:")
         for name, reason in skipped_items[:FINAL_SUMMARY_LIMIT]:
             lines.append(f"• {name} — {reason}")
         rest = len(skipped_items) - FINAL_SUMMARY_LIMIT
@@ -132,12 +132,12 @@ def _job_exists(chat_id: int) -> bool:
     return chat_id in _ACTIVE_JOBS
 
 
-def _unique_name(base_name: str, used_names: set[str], index: int) -> str:
-    name = base_name
-    if name in used_names:
-        name = f"{base_name}_{index:03d}"
-    used_names.add(name)
-    return name
+def _unique_name(base_name: str, used_names: dict[str, int]) -> str:
+    key = base_name.casefold()
+    used_names[key] = used_names.get(key, 0) + 1
+    if used_names[key] == 1:
+        return base_name
+    return f"{base_name}{used_names[key]}"
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,10 +222,10 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
         active_block = "\n".join(active_lines) if active_lines else "—"
         return (
             f"{phase}\n"
-            f"Скачано: {downloaded}/{total}\n"
+            f"Всего: {total}\n"
             f"Конвертировано: {converted}/{total}\n"
-            f"Пропущено: {skipped_download_count + skipped_convert_count}\n"
-            f"Активные:\n{active_block}"
+            f"Ошибки: {skipped_download_count + skipped_convert_count}\n"
+            f"Активные процессы:\n{active_block}"
         )
 
     try:
@@ -238,9 +238,9 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
         total = len(emotes)
 
         tasks: list[EmoteTask] = []
-        used_names: set[str] = set()
+        used_names: dict[str, int] = {}
 
-        await set_status(f"📥 Подготовка списка эмоутов...\nСкачано: 0/{total}\nКонвертировано: 0/{total}\nПропущено: 0\nАктивные:\n—")
+        await set_status(f"📥 Подготовка списка эмоутов...\nВсего: {total}\nКонвертировано: 0/{total}\nОшибки: 0\nАктивные процессы:\n—")
 
         for index, emote in enumerate(emotes, 1):
             if cancel_event.is_set():
@@ -253,7 +253,7 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
                 continue
 
             base_name = safe_name(emote_data.get("name", f"emote_{index}"))
-            name = _unique_name(base_name, used_names, index)
+            name = _unique_name(base_name, used_names)
             emote_id = emote_data.get("id")
             files = emote_data.get("host", {}).get("files", [])
             best_file = get_best_file_info(files)
@@ -392,7 +392,7 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
             await set_status(_format_summary("Не удалось собрать итоговый файл.", total, 0, skipped_items), active=False)
             return
 
-        await set_status(f"📦 Упаковываю архив...\nWEBM: {converted}\nПропущено: {skipped_convert_count}")
+        await set_status(f"📦 Упаковываю архив...\nWEBM: {converted}\nОшибки: {skipped_convert_count}")
         sent = await _send_zip_archive(update, webm_dir, zip_path, f"{set_id}.zip", cancel_event=cancel_event)
         if not sent:
             await set_status(_format_summary("Не удалось собрать итоговый файл.", total, converted, skipped_items), active=False)
@@ -439,7 +439,7 @@ async def _process_single_emote_job(update: Update, context: ContextTypes.DEFAUL
 
         await _update_job_status(
             job,
-            "📥 Скачивание эмоута...\nГотово: 0/1\nПропущено: 0\nТекущий: 1/1",
+            "📥 Скачивание эмоута...\nВсего: 1\nКонвертировано: 0/1\nОшибки: 0\nТекущий: 1/1",
             active=True,
         )
 
@@ -460,7 +460,7 @@ async def _process_single_emote_job(update: Update, context: ContextTypes.DEFAUL
         if not cancel_event.is_set():
             await _update_job_status(
                 job,
-                "🎬 Конвертация в WEBM...\nГотово: 0/1\nПропущено: 0\nТекущий: 1/1",
+                "🎬 Конвертация в WEBM...\nВсего: 1\nКонвертировано: 0/1\nОшибки: 0\nТекущий: 1/1",
                 active=True,
             )
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
-MAX_WEBM_SIZE = 256 * 1024
+MAX_WEBM_SIZE = 64 * 1024
 TARGET_FRAME_DURATION_MS = 30
 TARGET_SIZES = (100, 96, 92, 88, 84, 80)
 CRF_START = 32
@@ -78,10 +78,55 @@ def _select_profile(source_size: int | None) -> tuple[tuple[int, ...], int, int,
     if source_size is None:
         return LIGHT_TARGET_SIZES, CRF_START, CRF_STEP, 4
     if source_size >= 400_000:
-        return HEAVY_TARGET_SIZES, 38, 6, 6
+        return HEAVY_TARGET_SIZES, 40, 6, 6
     if source_size >= 180_000:
-        return MEDIUM_TARGET_SIZES, 34, 5, 5
+        return MEDIUM_TARGET_SIZES, 36, 5, 5
     return LIGHT_TARGET_SIZES, CRF_START, CRF_STEP, 4
+
+
+def _frame_render_limit(source_size: int | None, frame_count: int) -> int:
+    if frame_count <= 0:
+        return 0
+    if source_size is not None and source_size >= 400_000:
+        return min(frame_count, 60)
+    if source_size is not None and source_size >= 180_000:
+        return min(frame_count, 72)
+    if frame_count > 120:
+        return min(frame_count, 60)
+    if frame_count > 90:
+        return min(frame_count, 72)
+    return min(frame_count, 90)
+
+
+def _sample_rendered_frames(rendered_frames: list[tuple[Path, int]], max_frames: int) -> list[tuple[Path, int]]:
+    if max_frames <= 0 or len(rendered_frames) <= max_frames:
+        return rendered_frames
+    if max_frames == 1:
+        return [rendered_frames[0]]
+
+    positions = [
+        round(i * (len(rendered_frames) - 1) / (max_frames - 1))
+        for i in range(max_frames)
+    ]
+
+    sampled: list[tuple[Path, int]] = []
+    seen: set[int] = set()
+    for pos in positions:
+        pos = max(0, min(len(rendered_frames) - 1, int(pos)))
+        if pos in seen:
+            continue
+        seen.add(pos)
+        sampled.append(rendered_frames[pos])
+
+    if len(sampled) < max_frames:
+        for pos, item in enumerate(rendered_frames):
+            if pos in seen:
+                continue
+            sampled.append(item)
+            if len(sampled) >= max_frames:
+                break
+
+    return sampled[:max_frames]
 
 
 def _terminate_process(proc: subprocess.Popen) -> None:
@@ -217,9 +262,10 @@ def _render_webp_to_png_sequence(
     frame_dir: Path,
     cancel_event=None,
     max_duration_ms: int = 2950,
-) -> list[int]:
+    source_size: int | None = None,
+) -> tuple[Path, int, int]:
     canvas_w, canvas_h, frames = _probe_webp(webp_path, cancel_event=cancel_event)
-    durations: list[int] = []
+    rendered_frames: list[tuple[Path, int]] = []
     elapsed_ms = 0
 
     canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
@@ -254,14 +300,25 @@ def _render_webp_to_png_sequence(
             output_path = frame_dir / f"frame_{meta.index:03d}.png"
             current.save(output_path, format="PNG")
 
-            durations.append(meta.duration_ms)
+            rendered_frames.append((output_path, meta.duration_ms))
             elapsed_ms += meta.duration_ms
             canvas = current
 
             if meta.dispose == "background":
                 canvas.paste((0, 0, 0, 0), clear_box)
 
-    return durations
+    if not rendered_frames:
+        return frame_dir, 0, 0
+
+    frame_limit = _frame_render_limit(source_size, len(rendered_frames))
+    if len(rendered_frames) > frame_limit:
+        sampled_frames = _sample_rendered_frames(rendered_frames, frame_limit)
+        sampled_dir = Path(tempfile.mkdtemp(dir=frame_dir))
+        for index, (png_path, _) in enumerate(sampled_frames, 1):
+            shutil.copy2(png_path, sampled_dir / f"frame_{index:03d}.png")
+        return sampled_dir, elapsed_ms, len(sampled_frames)
+
+    return frame_dir, elapsed_ms, len(rendered_frames)
 
 
 
@@ -269,12 +326,13 @@ def _encode_png_sequence_to_webm(
     frame_dir: Path,
     out_path: Path,
     crf: int,
-    frame_duration_ms: int,
+    total_duration_ms: int,
+    frame_count: int,
     target_size: int,
     cancel_event=None,
     cpu_used: int = 4,
 ) -> None:
-    fps = 1000 / frame_duration_ms
+    fps = max(1.0 / 1000.0, frame_count * 1000.0 / max(1, total_duration_ms))
 
     cmd = [
         "ffmpeg",
@@ -365,11 +423,14 @@ def _convert_single_webp_main(
         try:
             with tempfile.TemporaryDirectory(dir=webp_path.parent) as tmp:
                 frame_dir = Path(tmp)
-                durations = _render_webp_to_png_sequence(webp_path, frame_dir, cancel_event=cancel_event)
-                if not durations:
+                encode_dir, total_duration_ms, frame_count = _render_webp_to_png_sequence(
+                    webp_path,
+                    frame_dir,
+                    cancel_event=cancel_event,
+                    source_size=source_size,
+                )
+                if frame_count <= 0 or total_duration_ms <= 0:
                     return False, "не удалось извлечь кадры"
-
-                frame_duration_ms = max(1, int(round(sum(durations) / len(durations))))
 
                 while crf <= CRF_MAX:
                     _check_cancel(cancel_event)
@@ -382,10 +443,11 @@ def _convert_single_webp_main(
 
                     try:
                         _encode_png_sequence_to_webm(
-                            frame_dir,
+                            encode_dir,
                             out_path,
                             crf,
-                            frame_duration_ms,
+                            total_duration_ms,
+                            frame_count,
                             target_size,
                             cancel_event=cancel_event,
                             cpu_used=cpu_used,
@@ -546,7 +608,7 @@ async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=No
 
         name = webp.stem
         await safe_edit(
-            f"🎬 Конвертация в WEBM...\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {name}",
+            f"🎬 Конвертация в WEBM...\nВсего: {total}\nКонвертировано: {converted}/{total}\nОшибки: {skipped}\nТекущий: {name}",
         )
 
         out_path = webm_dir / f"{webp.stem}.webm"
@@ -565,12 +627,12 @@ async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=No
             skipped += 1
             skipped_items.append((name, reason or "неизвестная ошибка"))
             await safe_edit(
-                f"⚠️ Пропущен: {name}\nПричина: {reason or 'неизвестная ошибка'}\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {name}",
+                f"⚠️ Ошибка: {name}\nПричина: {reason or 'неизвестная ошибка'}\nВсего: {total}\nКонвертировано: {converted}/{total}\nОшибки: {skipped}\nТекущий: {name}",
             )
 
         if (index % 5 == 0 or index == total) and not (cancel_event is not None and cancel_event.is_set()):
             await safe_edit(
-                f"🎬 Конвертация в WEBM...\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {name}",
+                f"🎬 Конвертация в WEBM...\nВсего: {total}\nКонвертировано: {converted}/{total}\nОшибки: {skipped}\nТекущий: {name}",
             )
 
     return webm_dir, converted, skipped, skipped_items
