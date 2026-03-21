@@ -151,7 +151,7 @@ def _encode_png_sequence_to_webm(frame_dir: Path, out_path: Path, crf: int, fram
         "-framerate", f"{fps:.6f}",
         "-i", str(frame_dir / "frame_%03d.png"),
 
-        "-t", "3",  # лимит Telegram
+        "-t", "2.95",  # лимит Telegram
 
         "-vf",
         (
