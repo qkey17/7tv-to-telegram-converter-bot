@@ -5,7 +5,7 @@ import shutil
 import threading
 import time
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,8 @@ class JobState:
     cancel_event: threading.Event
     status_msg: Any
     task: asyncio.Task | None = None
+    ui_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    finished: bool = False
 
 
 SET_WORKER_COUNT = 3
@@ -61,6 +63,24 @@ async def _edit_status(status_msg, text: str, active: bool = True):
         await status_msg.edit_text(text, reply_markup=cancel_markup() if active else None)
     except Exception:
         pass
+
+
+async def _update_job_status(job: JobState, text: str, active: bool = True, force: bool = False) -> None:
+    if job.finished and not force:
+        return
+    if job.cancel_event.is_set() and not force:
+        return
+
+    async with job.ui_lock:
+        if job.finished and not force:
+            return
+        try:
+            await job.status_msg.edit_text(
+                text,
+                reply_markup=cancel_markup() if active and not job.cancel_event.is_set() and not job.finished else None,
+            )
+        except Exception:
+            pass
 
 
 def _build_zip(webm_dir: Path, zip_path: Path, cancel_event: threading.Event | None = None) -> None:
@@ -195,7 +215,7 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
             return
         last_status_update = now
         async with status_lock:
-            await _edit_status(status_msg, text, active=active and not cancel_event.is_set())
+            await _update_job_status(job, text, active=active, force=force)
 
     def render_status(phase: str) -> str:
         active_lines = [f"• {worker_id + 1}: {state}" for worker_id, state in sorted(worker_state.items()) if state and state != "—"]
@@ -380,8 +400,9 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
 
         await set_status(_format_summary("✅ Готово!", total, converted, skipped_items), active=False)
     except Exception as exc:
-        await _edit_status(status_msg, f"Ошибка обработки: {exc}", active=False)
+        await _update_job_status(job, f"Ошибка обработки: {exc}", active=False, force=True)
     finally:
+        job.finished = True
         _ACTIVE_JOBS.pop(chat_id, None)
         try:
             shutil.rmtree(work_dir)
@@ -405,7 +426,7 @@ async def _process_single_emote_job(update: Update, context: ContextTypes.DEFAUL
         payload = await asyncio.to_thread(fetch_emote, emote_id)
         emote = unwrap_emote(payload)
         if not emote:
-            await _edit_status(status_msg, "Ошибка получения эмоута.", active=False)
+            await _update_job_status(job, "Ошибка получения эмоута.", active=False, force=True)
             return
 
         name = safe_name(emote.get("name", emote_id))
@@ -413,12 +434,13 @@ async def _process_single_emote_job(update: Update, context: ContextTypes.DEFAUL
         best_file = get_best_file_info(files)
 
         if not best_file:
-            await _edit_status(status_msg, "У эмоута нет WEBP-файла.", active=False)
+            await _update_job_status(job, "У эмоута нет WEBP-файла.", active=False, force=True)
             return
 
-        await _edit_status(
-            status_msg,
+        await _update_job_status(
+            job,
             "📥 Скачивание эмоута...\nГотово: 0/1\nПропущено: 0\nТекущий: 1/1",
+            active=True,
         )
 
         url = CDN_BASE.format(id=emote_id, file=best_file.get("name"))
@@ -428,20 +450,19 @@ async def _process_single_emote_job(update: Update, context: ContextTypes.DEFAUL
         if not download_ok:
             if cancel_event.is_set():
                 summary = _format_summary("⛔ Отмена запрошена.", 1, 0, skipped_items)
-                await _edit_status(status_msg, summary, active=False)
+                await _update_job_status(job, summary, active=False, force=True)
                 return
             skipped_items.append((name, "ошибка скачивания"))
             summary = _format_summary("Не удалось скачать эмоут.", 1, 0, skipped_items)
-            await _edit_status(status_msg, summary, active=False)
+            await _update_job_status(job, summary, active=False, force=True)
             return
 
-        if cancel_event.is_set():
-            await _edit_status(status_msg, "⛔ Отмена... Сохраняю то, что уже готово.")
-
-        await _edit_status(
-            status_msg,
-            "🎬 Конвертация в WEBM...\nГотово: 0/1\nПропущено: 0\nТекущий: 1/1",
-        )
+        if not cancel_event.is_set():
+            await _update_job_status(
+                job,
+                "🎬 Конвертация в WEBM...\nГотово: 0/1\nПропущено: 0\nТекущий: 1/1",
+                active=True,
+            )
 
         webm_dir, converted, skipped_convert_count, skipped_convert = await convert_to_telegram_format(
             work_dir,
@@ -455,10 +476,10 @@ async def _process_single_emote_job(update: Update, context: ContextTypes.DEFAUL
         if cancel_event.is_set():
             if not webm_files:
                 summary = _format_summary("⛔ Отмена. Готовых WEBM нет.", 1, 0, skipped_items)
-                await _edit_status(status_msg, summary, active=False)
+                await _update_job_status(job, summary, active=False, force=True)
                 return
 
-            await _edit_status(status_msg, "📦 Архивирую готовый WEBM...")
+            await _update_job_status(job, "📦 Архивирую готовый WEBM...", active=False, force=True)
             sent = await _send_zip_archive(update, webm_dir, zip_path, f"{name}.zip", cancel_event=cancel_event)
             if sent:
                 summary = _format_summary(
@@ -467,15 +488,15 @@ async def _process_single_emote_job(update: Update, context: ContextTypes.DEFAUL
                     len(webm_files),
                     skipped_items,
                 )
-                await _edit_status(status_msg, summary, active=False)
+                await _update_job_status(job, summary, active=False, force=True)
             else:
                 summary = _format_summary("⛔ Отмена. Архив не удалось собрать.", 1, 0, skipped_items)
-                await _edit_status(status_msg, summary, active=False)
+                await _update_job_status(job, summary, active=False, force=True)
             return
 
         if not webm_files:
             summary = _format_summary("Не удалось собрать итоговый файл.", 1, 0, skipped_items)
-            await _edit_status(status_msg, summary, active=False)
+            await _update_job_status(job, summary, active=False, force=True)
             return
 
         result_file = webm_files[0]
@@ -483,10 +504,11 @@ async def _process_single_emote_job(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_document(f, filename=result_file.name)
 
         summary = _format_summary("✅ Готово!", 1, converted, skipped_items)
-        await _edit_status(status_msg, summary, active=False)
+        await _update_job_status(job, summary, active=False, force=True)
     except Exception as exc:
-        await _edit_status(status_msg, f"Ошибка обработки: {exc}", active=False)
+        await _update_job_status(job, f"Ошибка обработки: {exc}", active=False, force=True)
     finally:
+        job.finished = True
         _ACTIVE_JOBS.pop(chat_id, None)
         try:
             shutil.rmtree(work_dir)
@@ -519,7 +541,7 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job.cancel_event.set()
 
     try:
-        await query.message.edit_text("⛔ Отмена запрошена...", reply_markup=None)
+        await _update_job_status(job, "⛔ Отмена запрошена...", active=False, force=True)
     except Exception:
         pass
 

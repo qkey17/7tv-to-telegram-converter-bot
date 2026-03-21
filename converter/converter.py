@@ -13,15 +13,15 @@ from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
-MAX_WEBM_SIZE = 64 * 1024
+MAX_WEBM_SIZE = 256 * 1024
 TARGET_FRAME_DURATION_MS = 30
 TARGET_SIZES = (100, 96, 92, 88, 84, 80)
 CRF_START = 32
-CRF_STEP = 2
+CRF_STEP = 4
 CRF_MAX = 60
-LIGHT_TARGET_SIZES = (100, 96, 92, 88, 84, 80)
-MEDIUM_TARGET_SIZES = (96, 92, 88, 84, 80, 76)
-HEAVY_TARGET_SIZES = (92, 88, 84, 80, 76, 72, 68)
+LIGHT_TARGET_SIZES = (100,)
+MEDIUM_TARGET_SIZES = (100,)
+HEAVY_TARGET_SIZES = (100,)
 
 
 class ConversionCancelled(Exception):
@@ -62,19 +62,26 @@ def _im_cmd() -> list[str]:
     return ["convert"]
 
 
+def _scale_filter(target_size: int, flags: str = "lanczos") -> str:
+    return (
+        f"scale=w='if(gte(iw,ih),{target_size},-2)':h='if(gte(iw,ih),-2,{target_size})':flags={flags},"
+        f"pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=0x00000000"
+    )
+
+
 def _check_cancel(cancel_event=None):
     if cancel_event is not None and cancel_event.is_set():
         raise ConversionCancelled()
 
 
-def _select_profile(source_size: int | None) -> tuple[tuple[int, ...], int, int]:
+def _select_profile(source_size: int | None) -> tuple[tuple[int, ...], int, int, int]:
     if source_size is None:
-        return LIGHT_TARGET_SIZES, CRF_START, 4
+        return LIGHT_TARGET_SIZES, CRF_START, CRF_STEP, 4
+    if source_size >= 400_000:
+        return HEAVY_TARGET_SIZES, 38, 6, 6
     if source_size >= 180_000:
-        return HEAVY_TARGET_SIZES, 40, 6
-    if source_size >= 110_000:
-        return MEDIUM_TARGET_SIZES, 36, 5
-    return LIGHT_TARGET_SIZES, CRF_START, 4
+        return MEDIUM_TARGET_SIZES, 34, 5, 5
+    return LIGHT_TARGET_SIZES, CRF_START, CRF_STEP, 4
 
 
 def _terminate_process(proc: subprocess.Popen) -> None:
@@ -281,10 +288,7 @@ def _encode_png_sequence_to_webm(
         "-t",
         "2.95",
         "-vf",
-        (
-            f"scale={target_size}:{target_size}:flags=lanczos:force_original_aspect_ratio=decrease,"
-            f"pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=0x00000000"
-        ),
+        _scale_filter(target_size),
         "-an",
         "-c:v",
         "libvpx-vp9",
@@ -321,10 +325,7 @@ def _encode_gif_to_webm(gif_path: Path, out_path: Path, crf: int, target_size: i
         "-i",
         str(gif_path),
         "-vf",
-        (
-            f"fps=30,scale={target_size}:{target_size}:flags=lanczos:force_original_aspect_ratio=decrease,"
-            f"pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=0x00000000"
-        ),
+        _scale_filter(target_size),
         "-frames:v",
         "90",
         "-an",
@@ -351,7 +352,7 @@ def _convert_single_webp_main(
     source_size: int | None = None,
 ) -> tuple[bool, str | None]:
     last_reason = None
-    target_sizes, crf_start, cpu_used = _select_profile(source_size)
+    target_sizes, crf_start, crf_step, cpu_used = _select_profile(source_size)
 
     for target_size in target_sizes:
         _check_cancel(cancel_event)
@@ -370,7 +371,7 @@ def _convert_single_webp_main(
                 if not durations:
                     return False, "не удалось извлечь кадры"
 
-                frame_duration_ms = durations[0] if durations else TARGET_FRAME_DURATION_MS
+                frame_duration_ms = max(1, int(round(sum(durations) / len(durations))))
 
                 while crf <= CRF_MAX:
                     _check_cancel(cancel_event)
@@ -393,11 +394,11 @@ def _convert_single_webp_main(
                         )
                     except subprocess.TimeoutExpired:
                         last_reason = f"таймаут на размере {target_size}px, CRF {crf}"
-                        crf += CRF_STEP
+                        crf += crf_step
                         continue
                     except subprocess.CalledProcessError:
                         last_reason = f"ошибка кодирования на размере {target_size}px, CRF {crf}"
-                        crf += CRF_STEP
+                        crf += crf_step
                         continue
 
                     if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
@@ -409,8 +410,8 @@ def _convert_single_webp_main(
                         except Exception:
                             pass
 
-                    last_reason = f"файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
-                    crf += CRF_STEP
+                    last_reason = f"файл больше лимита 256 KB (размер {target_size}px, CRF {crf})"
+                    crf += crf_step
 
         except ConversionCancelled:
             raise
@@ -438,7 +439,7 @@ def _convert_single_webp_via_gif(
     source_size: int | None = None,
 ) -> tuple[bool, str | None]:
     last_reason = None
-    target_sizes, crf_start, cpu_used = _select_profile(source_size)
+    target_sizes, crf_start, crf_step, cpu_used = _select_profile(source_size)
 
     for target_size in target_sizes:
         _check_cancel(cancel_event)
@@ -469,11 +470,11 @@ def _convert_single_webp_via_gif(
                         _encode_gif_to_webm(gif_path, out_path, crf, target_size, cancel_event=cancel_event, cpu_used=cpu_used)
                     except subprocess.TimeoutExpired:
                         last_reason = f"таймаут GIF fallback на размере {target_size}px, CRF {crf}"
-                        crf += CRF_STEP
+                        crf += crf_step
                         continue
                     except subprocess.CalledProcessError:
                         last_reason = f"ошибка GIF fallback на размере {target_size}px, CRF {crf}"
-                        crf += CRF_STEP
+                        crf += crf_step
                         continue
 
                     if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
@@ -485,8 +486,8 @@ def _convert_single_webp_via_gif(
                         except Exception:
                             pass
 
-                    last_reason = f"GIF fallback: файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
-                    crf += CRF_STEP
+                    last_reason = f"GIF fallback: файл больше лимита 256 KB (размер {target_size}px, CRF {crf})"
+                    crf += crf_step
 
         except ConversionCancelled:
             raise
@@ -527,6 +528,14 @@ async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=No
     webm_dir = work_dir / "telegram_emotes"
     webm_dir.mkdir(exist_ok=True)
 
+    async def safe_edit(text: str) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            return
+        try:
+            await status_msg.edit_text(text, reply_markup=reply_markup)
+        except Exception:
+            pass
+
     webp_files = sorted(work_dir.glob("*.webp"))
     total = len(webp_files)
     converted = 0
@@ -538,9 +547,8 @@ async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=No
             break
 
         name = webp.stem
-        await status_msg.edit_text(
+        await safe_edit(
             f"🎬 Конвертация в WEBM...\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {name}",
-            reply_markup=reply_markup,
         )
 
         out_path = webm_dir / f"{webp.stem}.webm"
@@ -558,15 +566,13 @@ async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=No
         else:
             skipped += 1
             skipped_items.append((name, reason or "неизвестная ошибка"))
-            await status_msg.edit_text(
+            await safe_edit(
                 f"⚠️ Пропущен: {name}\nПричина: {reason or 'неизвестная ошибка'}\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {name}",
-                reply_markup=reply_markup,
             )
 
-        if index % 5 == 0 or index == total:
-            await status_msg.edit_text(
+        if (index % 5 == 0 or index == total) and not (cancel_event is not None and cancel_event.is_set()):
+            await safe_edit(
                 f"🎬 Конвертация в WEBM...\nГотово: {converted}/{total}\nПропущено: {skipped}\nТекущий: {name}",
-                reply_markup=reply_markup,
             )
 
     return webm_dir, converted, skipped, skipped_items
