@@ -1,5 +1,6 @@
 import asyncio
 import shutil
+import threading
 import zipfile
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -33,14 +34,16 @@ async def _edit_status(status_msg, text: str, active: bool = True):
         pass
 
 
-def _build_zip(webm_dir, zip_path):
+def _build_zip(webm_dir, zip_path, cancel_event=None):
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for f in sorted(webm_dir.glob("*.webm")):
+            if cancel_event is not None and cancel_event.is_set():
+                break
             z.write(f, f.name)
 
 
-async def _send_zip_archive(update: Update, webm_dir, zip_path, filename: str) -> bool:
-    _build_zip(webm_dir, zip_path)
+async def _send_zip_archive(update: Update, webm_dir, zip_path, filename: str, cancel_event=None) -> bool:
+    _build_zip(webm_dir, zip_path, cancel_event=cancel_event)
     if zip_path.exists() and zip_path.stat().st_size > 0:
         with zip_path.open("rb") as archive:
             await update.message.reply_document(archive, filename=filename)
@@ -83,7 +86,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_emote_set(update: Update, context: ContextTypes.DEFAULT_TYPE, set_id: str):
-    cancel_event = asyncio.Event()
+    cancel_event = threading.Event()
     context.chat_data["cancel_event"] = cancel_event
 
     status_msg = await update.message.reply_text("⏳ Подготовка...", reply_markup=cancel_markup())
@@ -137,10 +140,12 @@ async def handle_emote_set(update: Update, context: ContextTypes.DEFAULT_TYPE, s
             url = CDN_BASE.format(id=emote_id, file=best_file)
             save_path = work_dir / f"{name}.webp"
 
-            ok = await asyncio.to_thread(download_file, url, save_path)
+            ok = await asyncio.to_thread(download_file, url, save_path, cancel_event)
             if ok:
                 downloaded += 1
             else:
+                if cancel_event.is_set():
+                    break
                 skipped_download_count += 1
                 skipped_downloads.append((name, "ошибка скачивания"))
 
@@ -166,7 +171,7 @@ async def handle_emote_set(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                 return
 
             await _edit_status(status_msg, "📦 Архивирую готовые WEBM...")
-            sent = await _send_zip_archive(update, webm_dir, zip_path, f"{set_id}.zip")
+            sent = await _send_zip_archive(update, webm_dir, zip_path, f"{set_id}.zip", cancel_event=cancel_event)
             if sent:
                 summary = _format_summary(
                     "⛔ Отмена выполнена. Частичный архив отправлен.",
@@ -193,7 +198,7 @@ async def handle_emote_set(update: Update, context: ContextTypes.DEFAULT_TYPE, s
             status_msg,
             f"📦 Упаковываю архив...\nWEBM: {converted}\nПропущено: {skipped_convert_count}",
         )
-        sent = await _send_zip_archive(update, webm_dir, zip_path, f"{set_id}.zip")
+        sent = await _send_zip_archive(update, webm_dir, zip_path, f"{set_id}.zip", cancel_event=cancel_event)
         if not sent:
             summary = _format_summary(
                 "Не удалось собрать итоговый файл.",
@@ -224,7 +229,7 @@ async def handle_emote_set(update: Update, context: ContextTypes.DEFAULT_TYPE, s
 
 
 async def handle_single_emote(update: Update, context: ContextTypes.DEFAULT_TYPE, emote_id: str):
-    cancel_event = asyncio.Event()
+    cancel_event = threading.Event()
     context.chat_data["cancel_event"] = cancel_event
 
     status_msg = await update.message.reply_text("⏳ Подготовка...", reply_markup=cancel_markup())
@@ -256,7 +261,12 @@ async def handle_single_emote(update: Update, context: ContextTypes.DEFAULT_TYPE
         url = CDN_BASE.format(id=emote_id, file=best_file)
         save_path = work_dir / f"{name}.webp"
 
-        if not await asyncio.to_thread(download_file, url, save_path):
+        download_ok = await asyncio.to_thread(download_file, url, save_path, cancel_event)
+        if not download_ok:
+            if cancel_event.is_set():
+                summary = _format_summary("⛔ Отмена запрошена.", 1, 0, skipped_items)
+                await _edit_status(status_msg, summary, active=False)
+                return
             skipped_items.append((name, "ошибка скачивания"))
             summary = _format_summary("Не удалось скачать эмоут.", 1, 0, skipped_items)
             await _edit_status(status_msg, summary, active=False)
@@ -286,7 +296,7 @@ async def handle_single_emote(update: Update, context: ContextTypes.DEFAULT_TYPE
                 return
 
             await _edit_status(status_msg, "📦 Архивирую готовый WEBM...")
-            sent = await _send_zip_archive(update, webm_dir, zip_path, f"{name}.zip")
+            sent = await _send_zip_archive(update, webm_dir, zip_path, f"{name}.zip", cancel_event=cancel_event)
             if sent:
                 summary = _format_summary(
                     "⛔ Отмена выполнена. Частичный архив отправлен.",
