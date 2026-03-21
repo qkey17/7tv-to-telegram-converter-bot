@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
-from exceptions import ConversionCancelled
 
 MAX_WEBM_SIZE = 64 * 1024
 TARGET_FRAME_DURATION_MS = 30
@@ -59,7 +58,7 @@ def _im_cmd() -> list[str]:
 
 def _check_cancel(cancel_event=None):
     if cancel_event is not None and cancel_event.is_set():
-        raise ConversionCancelled()
+        raise asyncio.CancelledError()
 
 
 def _terminate_process(proc: subprocess.Popen) -> None:
@@ -379,7 +378,7 @@ def _convert_single_webp_main(webp_path: Path, out_path: Path, cancel_event=None
                     last_reason = f"файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
                     crf += CRF_STEP
 
-        except ConversionCancelled:
+        except asyncio.CancelledError:
             raise
         except subprocess.TimeoutExpired:
             last_reason = f"таймаут на размере {target_size}px, CRF {crf}"
@@ -449,7 +448,7 @@ def _convert_single_webp_via_gif(webp_path: Path, out_path: Path, cancel_event=N
                     last_reason = f"GIF fallback: файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
                     crf += CRF_STEP
 
-        except ConversionCancelled:
+        except asyncio.CancelledError:
             raise
         except subprocess.TimeoutExpired:
             last_reason = f"таймаут GIF fallback на размере {target_size}px, CRF {crf}"
@@ -502,7 +501,7 @@ async def convert_to_telegram_format(work_dir: Path, status_msg, cancel_event=No
         out_path = webm_dir / f"{webp.stem}.webm"
         try:
             ok, reason = await asyncio.to_thread(_convert_single_webp, webp, out_path, cancel_event)
-        except ConversionCancelled:
+        except asyncio.CancelledError:
             break
         except Exception as exc:
             ok = False

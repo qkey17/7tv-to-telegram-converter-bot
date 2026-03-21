@@ -14,7 +14,6 @@ from telegram.ext import ContextTypes
 
 from config import CDN_BASE, SAVE_ROOT
 from converter.converter import convert_to_telegram_format, convert_webp_to_webm
-from exceptions import ConversionCancelled
 from downloader.downloader import download_file
 from seven_tv.api import (
     extract_emote_id,
@@ -309,7 +308,7 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
 
                 try:
                     ok, reason = await asyncio.to_thread(convert_webp_to_webm, item.webp_path, item.webm_path, cancel_event)
-                except ConversionCancelled:
+                except asyncio.CancelledError:
                     worker_state[worker_id] = "—"
                     if item.webp_path.exists():
                         try:
@@ -507,6 +506,8 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     job.cancel_event.set()
+    if job.task is not None and not job.task.done():
+        job.task.cancel()
 
     try:
         await query.message.edit_text("⛔ Отмена запрошена...", reply_markup=None)
