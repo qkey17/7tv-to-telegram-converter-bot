@@ -438,6 +438,7 @@ def _convert_single_webp_main(
                     webp_path,
                     frame_dir,
                     cancel_event=cancel_event,
+                    max_duration_ms=10000,  # 🔥 ВАЖНО
                     source_size=source_size,
                 )
                 if frame_count <= 0 or total_duration_ms <= 0:
