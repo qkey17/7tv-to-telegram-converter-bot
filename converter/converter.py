@@ -314,9 +314,14 @@ def _render_webp_to_png_sequence(
     if len(rendered_frames) > frame_limit:
         sampled_frames = _sample_rendered_frames(rendered_frames, frame_limit)
         sampled_dir = Path(tempfile.mkdtemp(dir=frame_dir))
-        for index, (png_path, _) in enumerate(sampled_frames, 1):
+
+        new_elapsed_ms = 0
+
+        for index, (png_path, duration) in enumerate(sampled_frames, 1):
             shutil.copy2(png_path, sampled_dir / f"frame_{index:03d}.png")
-        return sampled_dir, elapsed_ms, len(sampled_frames)
+            new_elapsed_ms += duration
+
+        return sampled_dir, new_elapsed_ms, len(sampled_frames)
 
     return frame_dir, elapsed_ms, len(rendered_frames)
 
@@ -391,7 +396,7 @@ def _encode_gif_to_webm(
         "-i", str(gif_path),
 
         "-vf",
-        "fps=15," + _scale_filter(target_size, flags="bilinear"),
+        "fps=15:round=down," + _scale_filter(target_size, flags="bilinear"),
 
         "-an",
         "-c:v", "libvpx-vp9",
