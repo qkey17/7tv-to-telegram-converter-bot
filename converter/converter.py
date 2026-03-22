@@ -88,13 +88,11 @@ def _frame_render_limit(source_size: int | None, frame_count: int) -> int:
     if frame_count <= 0:
         return 0
     if source_size is not None and source_size >= 400_000:
-        duration_sec = frame_count * TARGET_FRAME_DURATION_MS / 1000
-        return min(frame_count, int(15 * duration_sec))
+        return min(frame_count, 60)
     if source_size is not None and source_size >= 180_000:
         return min(frame_count, 72)
     if frame_count > 120:
-        duration_sec = frame_count * TARGET_FRAME_DURATION_MS / 1000
-        return min(frame_count, int(15 * duration_sec))
+        return min(frame_count, 60)
     if frame_count > 90:
         return min(frame_count, 72)
     return min(frame_count, 90)
@@ -337,7 +335,10 @@ def _encode_png_sequence_to_webm(
     cancel_event=None,
     cpu_used: int = 4,
 ) -> None:
-    fps = max(10, min(20, frame_count / (total_duration_ms / 1000)))
+    fps = min(
+        30,
+        max(1.0, frame_count * 1000.0 / max(1, total_duration_ms))
+    )
 
     cmd = [
         "ffmpeg",
