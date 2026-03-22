@@ -388,7 +388,7 @@ def _encode_gif_to_webm(
         "-i", str(gif_path),
 
         "-vf",
-        "fps=20," + _scale_filter(target_size, flags="bilinear"),
+        "fps=15," + _scale_filter(target_size, flags="bilinear"),
 
         "-an",
         "-c:v", "libvpx-vp9",
@@ -470,10 +470,6 @@ def _convert_single_webp_main(
                     except subprocess.CalledProcessError:
                         last_reason = f"ошибка кодирования на размере {target_size}px, CRF {crf}"
                         attempts += 1
-                        crf += crf_step
-                        continue
-                    except subprocess.CalledProcessError:
-                        last_reason = f"ошибка кодирования на размере {target_size}px, CRF {crf}"
                         crf += crf_step
                         continue
 
@@ -563,10 +559,6 @@ def _convert_single_webp_via_gif(
                         attempts += 1
                         crf += crf_step
                         continue
-                    except subprocess.CalledProcessError:
-                        last_reason = f"ошибка GIF fallback на размере {target_size}px, CRF {crf}"
-                        crf += crf_step
-                        continue
 
                     if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
                         return True, None
@@ -592,6 +584,39 @@ def _convert_single_webp_via_gif(
         except (UnidentifiedImageError, OSError, ValueError) as exc:
             last_reason = str(exc)
             continue
+
+    # последний шанс — очень агрессивный режим (fps=12)
+    try:
+        if out_path.exists():
+            out_path.unlink()
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", str(gif_path),
+            "-vf",
+            "fps=12," + _scale_filter(target_size, flags="bilinear"),
+            "-an",
+            "-c:v", "libvpx-vp9",
+            "-pix_fmt", "yuva420p",
+            "-auto-alt-ref", "0",
+            "-b:v", "0",
+            "-crf", "52",
+            "-cpu-used", "6",
+            "-row-mt", "1",
+            str(out_path),
+        ]
+
+        _run_subprocess(cmd, cancel_event=cancel_event)
+
+        if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
+            return True, None
+
+        if out_path.exists():
+            out_path.unlink()
+
+    except Exception:
+        pass
 
     return False, last_reason or "GIF fallback не смог уложить WEBM в лимит"
 
