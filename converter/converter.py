@@ -98,33 +98,25 @@ def _frame_render_limit(source_size: int | None, frame_count: int) -> int:
     return min(frame_count, 90)
 
 
-def _sample_rendered_frames(rendered_frames: list[tuple[Path, int]], max_frames: int) -> list[tuple[Path, int]]:
+def _sample_rendered_frames(rendered_frames, max_frames):
     if max_frames <= 0 or len(rendered_frames) <= max_frames:
         return rendered_frames
-    if max_frames == 1:
-        return [rendered_frames[0]]
 
-    positions = [
-        round(i * (len(rendered_frames) - 1) / (max_frames - 1))
-        for i in range(max_frames)
-    ]
+    total_duration = sum(d for _, d in rendered_frames)
+    target_step = total_duration / max_frames
 
-    sampled: list[tuple[Path, int]] = []
-    seen: set[int] = set()
-    for pos in positions:
-        pos = max(0, min(len(rendered_frames) - 1, int(pos)))
-        if pos in seen:
-            continue
-        seen.add(pos)
-        sampled.append(rendered_frames[pos])
+    sampled = []
+    acc = 0
+    current_target = target_step
+
+    for frame in rendered_frames:
+        acc += frame[1]
+        if acc >= current_target:
+            sampled.append(frame)
+            current_target += target_step
 
     if len(sampled) < max_frames:
-        for pos, item in enumerate(rendered_frames):
-            if pos in seen:
-                continue
-            sampled.append(item)
-            if len(sampled) >= max_frames:
-                break
+        sampled.append(rendered_frames[-1])
 
     return sampled[:max_frames]
 
