@@ -374,29 +374,35 @@ def _render_webp_to_gif(webp_path: Path, gif_path: Path, cancel_event=None) -> N
     _run_subprocess(cmd, cancel_event=cancel_event)
 
 
-def _encode_gif_to_webm(gif_path: Path, out_path: Path, crf: int, target_size: int, cancel_event=None, cpu_used: int = 4) -> None:
+def _encode_gif_to_webm(
+    gif_path: Path,
+    out_path: Path,
+    crf: int,
+    target_size: int,
+    cancel_event=None,
+    cpu_used: int = 4,
+) -> None:
     cmd = [
         "ffmpeg",
         "-y",
-        "-i",
-        str(gif_path),
+        "-i", str(gif_path),
+
         "-vf",
-        _scale_filter(target_size),
-        "-frames:v",
-        "90",
+        "fps=20," + _scale_filter(target_size, flags="bilinear"),
+
         "-an",
-        "-c:v",
-        "libvpx-vp9",
-        "-pix_fmt",
-        "yuva420p",
-        "-auto-alt-ref",
-        "0",
-        "-b:v",
-        "0",
-        "-crf",
-        str(crf),
+        "-c:v", "libvpx-vp9",
+        "-pix_fmt", "yuva420p",
+        "-auto-alt-ref", "0",
+        "-b:v", "0",
+        "-crf", str(crf),
+
+        "-cpu-used", str(cpu_used),
+        "-row-mt", "1",
+
         str(out_path),
     ]
+
     _run_subprocess(cmd, cancel_event=cancel_event)
 
 
@@ -432,7 +438,10 @@ def _convert_single_webp_main(
                 if frame_count <= 0 or total_duration_ms <= 0:
                     return False, "не удалось извлечь кадры"
 
-                while crf <= CRF_MAX:
+                attempts = 0
+                max_attempts = 2
+
+                while attempts < max_attempts:
                     _check_cancel(cancel_event)
 
                     if out_path.exists():
@@ -454,6 +463,13 @@ def _convert_single_webp_main(
                         )
                     except subprocess.TimeoutExpired:
                         last_reason = f"таймаут на размере {target_size}px, CRF {crf}"
+                        attempts += 1
+                        crf += crf_step
+                        continue
+
+                    except subprocess.CalledProcessError:
+                        last_reason = f"ошибка кодирования на размере {target_size}px, CRF {crf}"
+                        attempts += 1
                         crf += crf_step
                         continue
                     except subprocess.CalledProcessError:
@@ -471,6 +487,7 @@ def _convert_single_webp_main(
                             pass
 
                     last_reason = f"файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
+                    attempts += 1
                     crf += crf_step
 
         except ConversionCancelled:
@@ -521,7 +538,10 @@ def _convert_single_webp_via_gif(
                 gif_path = tmp_dir / f"{webp_path.stem}.gif"
                 _render_webp_to_gif(webp_path, gif_path, cancel_event=cancel_event)
 
-                while crf <= CRF_MAX:
+                attempts = 0
+                max_attempts = 2
+
+                while attempts < max_attempts:
                     _check_cancel(cancel_event)
 
                     if out_path.exists():
@@ -534,6 +554,13 @@ def _convert_single_webp_via_gif(
                         _encode_gif_to_webm(gif_path, out_path, crf, target_size, cancel_event=cancel_event, cpu_used=cpu_used)
                     except subprocess.TimeoutExpired:
                         last_reason = f"таймаут GIF fallback на размере {target_size}px, CRF {crf}"
+                        attempts += 1
+                        crf += crf_step
+                        continue
+
+                    except subprocess.CalledProcessError:
+                        last_reason = f"ошибка GIF fallback на размере {target_size}px, CRF {crf}"
+                        attempts += 1
                         crf += crf_step
                         continue
                     except subprocess.CalledProcessError:
@@ -551,6 +578,7 @@ def _convert_single_webp_via_gif(
                             pass
 
                     last_reason = f"GIF fallback: файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
+                    attempts += 1
                     crf += crf_step
 
         except ConversionCancelled:
