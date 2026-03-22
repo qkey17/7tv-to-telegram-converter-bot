@@ -315,13 +315,11 @@ def _render_webp_to_png_sequence(
         sampled_frames = _sample_rendered_frames(rendered_frames, frame_limit)
         sampled_dir = Path(tempfile.mkdtemp(dir=frame_dir))
 
-        new_elapsed_ms = 0
-
-        for index, (png_path, duration) in enumerate(sampled_frames, 1):
+        for index, (png_path, _) in enumerate(sampled_frames, 1):
             shutil.copy2(png_path, sampled_dir / f"frame_{index:03d}.png")
-            new_elapsed_ms += duration
 
-        return sampled_dir, new_elapsed_ms, len(sampled_frames)
+        # Сохраняем исходную длительность анимации, чтобы sampled-кадры не ускоряли результат.
+        return sampled_dir, elapsed_ms, len(sampled_frames)
 
     return frame_dir, elapsed_ms, len(rendered_frames)
 
