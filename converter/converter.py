@@ -13,7 +13,6 @@ from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
-print("CONVERTER VERSION 999")
 
 MAX_WEBM_SIZE = 64 * 1024
 TARGET_FRAME_DURATION_MS = 30
@@ -420,6 +419,7 @@ def _convert_single_webp_main(
     cancel_event=None,
     source_size: int | None = None,
 ) -> tuple[bool, str | None]:
+    print("PNG PIPELINE ENTER")
     last_reason = None
     target_sizes, crf_start, crf_step, cpu_used = _select_profile(source_size)
 
@@ -523,6 +523,7 @@ def _convert_single_webp_via_gif(
     cancel_event=None,
     source_size: int | None = None,
 ) -> tuple[bool, str | None]:
+    print("GIF PIPELINE ENTER")
     last_reason = None
     target_sizes, crf_start, crf_step, cpu_used = _select_profile(source_size)
 

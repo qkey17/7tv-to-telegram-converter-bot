@@ -30,7 +30,6 @@ def main():
 
     # === Запуск бота ===
     print("Bot started")
-    print("MAIN VERSION 999")
     app.run_polling(drop_pending_updates=True)
 
 
