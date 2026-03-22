@@ -64,8 +64,8 @@ def _im_cmd() -> list[str]:
 
 def _scale_filter(target_size: int, flags: str = "lanczos") -> str:
     return (
-        f"scale=w='if(gte(iw,ih),{target_size},-2)':h='if(gte(iw,ih),-2,{target_size})':flags={flags},"
-        f"pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=0x00000000"
+        f"crop='min(iw\\,ih)':'min(iw\\,ih)':(iw-min(iw\\,ih))/2:(ih-min(iw\\,ih))/2,"
+        f"scale={target_size}:{target_size}:flags={flags}"
     )
 
 
@@ -470,7 +470,7 @@ def _convert_single_webp_main(
                         except Exception:
                             pass
 
-                    last_reason = f"файл больше лимита 256 KB (размер {target_size}px, CRF {crf})"
+                    last_reason = f"файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
                     crf += crf_step
 
         except ConversionCancelled:
@@ -488,7 +488,11 @@ def _convert_single_webp_main(
                 return False, message
             continue
 
-    return False, last_reason or "не удалось уложить WEBM в лимит"
+    hard_ok, hard_reason = _convert_single_webp_hard_fallback(webp_path, out_path, cancel_event=cancel_event, source_size=source_size)
+    if hard_ok:
+        return True, None
+
+    return False, hard_reason or last_reason or "не удалось уложить WEBM в лимит"
 
 
 
@@ -546,7 +550,7 @@ def _convert_single_webp_via_gif(
                         except Exception:
                             pass
 
-                    last_reason = f"GIF fallback: файл больше лимита 256 KB (размер {target_size}px, CRF {crf})"
+                    last_reason = f"GIF fallback: файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
                     crf += crf_step
 
         except ConversionCancelled:
@@ -563,6 +567,91 @@ def _convert_single_webp_via_gif(
 
     return False, last_reason or "GIF fallback не смог уложить WEBM в лимит"
 
+
+
+def _convert_single_webp_hard_fallback(
+    webp_path: Path,
+    out_path: Path,
+    cancel_event=None,
+    source_size: int | None = None,
+) -> tuple[bool, str | None]:
+    last_reason = None
+    hard_sizes = (100, 96, 92)
+    hard_crf_start = 52
+    hard_crf_step = 4
+    hard_cpu_used = 6
+
+    for target_size in hard_sizes:
+        _check_cancel(cancel_event)
+        crf = hard_crf_start
+
+        if out_path.exists():
+            try:
+                out_path.unlink()
+            except Exception:
+                pass
+
+        try:
+            with tempfile.TemporaryDirectory(dir=webp_path.parent) as tmp:
+                frame_dir = Path(tmp)
+                encode_dir, total_duration_ms, frame_count = _render_webp_to_png_sequence(
+                    webp_path,
+                    frame_dir,
+                    cancel_event=cancel_event,
+                    max_duration_ms=2400,
+                    source_size=source_size,
+                )
+                if frame_count <= 0 or total_duration_ms <= 0:
+                    return False, "не удалось извлечь кадры"
+
+                while crf <= 60:
+                    _check_cancel(cancel_event)
+
+                    if out_path.exists():
+                        try:
+                            out_path.unlink()
+                        except Exception:
+                            pass
+
+                    try:
+                        _encode_png_sequence_to_webm(
+                            encode_dir,
+                            out_path,
+                            crf,
+                            total_duration_ms,
+                            frame_count,
+                            target_size,
+                            cancel_event=cancel_event,
+                            cpu_used=hard_cpu_used,
+                        )
+                    except subprocess.TimeoutExpired:
+                        last_reason = f"таймаут hard fallback на размере {target_size}px, CRF {crf}"
+                        crf += hard_crf_step
+                        continue
+                    except subprocess.CalledProcessError:
+                        last_reason = f"ошибка hard fallback на размере {target_size}px, CRF {crf}"
+                        crf += hard_crf_step
+                        continue
+
+                    if out_path.exists() and out_path.stat().st_size <= MAX_WEBM_SIZE:
+                        return True, None
+
+                    if out_path.exists():
+                        try:
+                            out_path.unlink()
+                        except Exception:
+                            pass
+
+                    last_reason = f"hard fallback: файл больше лимита 64 KB (размер {target_size}px, CRF {crf})"
+                    crf += hard_crf_step
+
+        except ConversionCancelled:
+            raise
+        except Exception as exc:
+            last_reason = str(exc)
+            continue
+
+    return False, last_reason or "hard fallback не смог уложить WEBM в лимит"
 
 def _convert_single_webp(
     webp_path: Path,

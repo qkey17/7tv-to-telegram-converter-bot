@@ -37,6 +37,10 @@ class JobState:
     task: asyncio.Task | None = None
     ui_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     finished: bool = False
+    total: int = 0
+    sent: int = 0
+    errors: int = 0
+    skipped_items: list[tuple[str, str]] = field(default_factory=list, repr=False)
 
 
 SET_WORKER_COUNT = 3
@@ -228,6 +232,12 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
             f"Активные процессы:\n{active_block}"
         )
 
+    def sync_job_stats() -> None:
+        job.total = total
+        job.sent = converted
+        job.errors = skipped_download_count + skipped_convert_count
+        job.skipped_items = skipped_downloads + skipped_convert
+
     try:
         data = await asyncio.to_thread(fetch_emote_list, set_id)
         if not data or "emotes" not in data:
@@ -236,6 +246,7 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
 
         emotes = list(data["emotes"])
         total = len(emotes)
+        sync_job_stats()
 
         tasks: list[EmoteTask] = []
         used_names: dict[str, int] = {}
@@ -250,6 +261,7 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
             if not emote_data:
                 skipped_download_count += 1
                 skipped_downloads.append((f"эмоут #{index}", "не удалось прочитать данные"))
+                sync_job_stats()
                 continue
 
             base_name = safe_name(emote_data.get("name", f"emote_{index}"))
@@ -261,6 +273,7 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
             if not best_file or not emote_id:
                 skipped_download_count += 1
                 skipped_downloads.append((name, "нет WEBP-файла или id"))
+                sync_job_stats()
                 continue
 
             url = CDN_BASE.format(id=emote_id, file=best_file.get("name"))
@@ -329,11 +342,15 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
                 if not ok:
                     skipped_download_count += 1
                     skipped_downloads.append((item.name, "ошибка скачивания"))
+                    sync_job_stats()
                     worker_state[worker_id] = "—"
                     await set_status(render_status("⚙️ Обработка эмоутов..."))
                     continue
 
                 downloaded += 1
+                job.sent = converted
+                job.errors = skipped_download_count + skipped_convert_count
+                job.skipped_items = skipped_downloads + skipped_convert
                 worker_state[worker_id] = f"🎬 {item.name}"
                 await set_status(render_status("⚙️ Обработка эмоутов..."))
 
@@ -356,6 +373,7 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
                 else:
                     skipped_convert_count += 1
                     skipped_convert.append((item.name, reason or "неизвестная ошибка"))
+                sync_job_stats()
 
                 if item.webp_path.exists():
                     try:
@@ -371,6 +389,7 @@ async def _process_emote_set_job(update: Update, context: ContextTypes.DEFAULT_T
 
         webm_files = sorted(webm_dir.glob("*.webm"))
         skipped_items = skipped_downloads + skipped_convert
+        sync_job_stats()
 
         if cancel_event.is_set():
             if not webm_files:
@@ -421,6 +440,10 @@ async def _process_single_emote_job(update: Update, context: ContextTypes.DEFAUL
     work_dir.mkdir(exist_ok=True)
     zip_path = SAVE_ROOT / f"{emote_id}.zip"
     skipped_items: list[tuple[str, str]] = []
+    job.total = 1
+    job.sent = 0
+    job.errors = 0
+    job.skipped_items = skipped_items
 
     try:
         payload = await asyncio.to_thread(fetch_emote, emote_id)
@@ -449,10 +472,12 @@ async def _process_single_emote_job(update: Update, context: ContextTypes.DEFAUL
         download_ok = await asyncio.to_thread(download_file, url, save_path, cancel_event)
         if not download_ok:
             if cancel_event.is_set():
-                summary = _format_summary("⛔ Отмена запрошена.", 1, 0, skipped_items)
+                summary = _format_summary("⛔ Отмена запрошена...\nОжидание завершения текущих задач...", 1, 0, skipped_items)
                 await _update_job_status(job, summary, active=False, force=True)
                 return
             skipped_items.append((name, "ошибка скачивания"))
+            job.errors = len(skipped_items)
+            job.skipped_items = skipped_items
             summary = _format_summary("Не удалось скачать эмоут.", 1, 0, skipped_items)
             await _update_job_status(job, summary, active=False, force=True)
             return
@@ -503,6 +528,9 @@ async def _process_single_emote_job(update: Update, context: ContextTypes.DEFAUL
         with result_file.open("rb") as f:
             await update.message.reply_document(f, filename=result_file.name)
 
+        job.sent = converted
+        job.errors = len(skipped_items)
+        job.skipped_items = skipped_items
         summary = _format_summary("✅ Готово!", 1, converted, skipped_items)
         await _update_job_status(job, summary, active=False, force=True)
     except Exception as exc:
@@ -541,7 +569,8 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job.cancel_event.set()
 
     try:
-        await _update_job_status(job, "⛔ Отмена запрошена...", active=False, force=True)
+        summary = _format_summary("⛔ Отмена запрошена...", job.total, job.sent, job.skipped_items)
+        await _update_job_status(job, summary, active=False, force=True)
     except Exception:
         pass
 
