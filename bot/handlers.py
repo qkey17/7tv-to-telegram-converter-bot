@@ -569,7 +569,7 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job.cancel_event.set()
 
     try:
-        summary = _format_summary("⛔ Отмена запрошена...", job.total, job.sent, job.skipped_items)
+        summary = _format_summary("⛔ Отмена.", job.total, job.sent, job.skipped_items)
         await _update_job_status(job, summary, active=False, force=True)
     except Exception:
         pass
