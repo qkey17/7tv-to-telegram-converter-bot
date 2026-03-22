@@ -13,7 +13,6 @@ from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
-
 MAX_WEBM_SIZE = 64 * 1024
 TARGET_FRAME_DURATION_MS = 30
 TARGET_SIZES = (100, 96, 92, 88, 84, 80)
@@ -99,25 +98,33 @@ def _frame_render_limit(source_size: int | None, frame_count: int) -> int:
     return min(frame_count, 90)
 
 
-def _sample_rendered_frames(rendered_frames, max_frames):
+def _sample_rendered_frames(rendered_frames: list[tuple[Path, int]], max_frames: int) -> list[tuple[Path, int]]:
     if max_frames <= 0 or len(rendered_frames) <= max_frames:
         return rendered_frames
+    if max_frames == 1:
+        return [rendered_frames[0]]
 
-    total_duration = sum(d for _, d in rendered_frames)
-    target_step = total_duration / max_frames
+    positions = [
+        round(i * (len(rendered_frames) - 1) / (max_frames - 1))
+        for i in range(max_frames)
+    ]
 
-    sampled = []
-    acc = 0
-    current_target = target_step
-
-    for frame in rendered_frames:
-        acc += frame[1]
-        if acc >= current_target:
-            sampled.append(frame)
-            current_target += target_step
+    sampled: list[tuple[Path, int]] = []
+    seen: set[int] = set()
+    for pos in positions:
+        pos = max(0, min(len(rendered_frames) - 1, int(pos)))
+        if pos in seen:
+            continue
+        seen.add(pos)
+        sampled.append(rendered_frames[pos])
 
     if len(sampled) < max_frames:
-        sampled.append(rendered_frames[-1])
+        for pos, item in enumerate(rendered_frames):
+            if pos in seen:
+                continue
+            sampled.append(item)
+            if len(sampled) >= max_frames:
+                break
 
     return sampled[:max_frames]
 
@@ -257,40 +264,64 @@ def _render_webp_to_png_sequence(
     max_duration_ms: int = 2950,
     source_size: int | None = None,
 ) -> tuple[Path, int, int]:
+    canvas_w, canvas_h, frames = _probe_webp(webp_path, cancel_event=cancel_event)
+    rendered_frames: list[tuple[Path, int]] = []
+    elapsed_ms = 0
 
-    _check_cancel(cancel_event)
+    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
 
-    # dwebp умеет сразу распаковать ВСЮ анимацию
-    cmd = [
-        "dwebp",
-        str(webp_path),
-        "-o",
-        str(frame_dir / "frame_%03d.png"),
-    ]
+    with tempfile.TemporaryDirectory(dir=frame_dir) as extract_tmp:
+        extract_dir = Path(extract_tmp)
 
-    _run_subprocess(cmd, cancel_event=cancel_event)
+        for meta in frames:
+            _check_cancel(cancel_event)
+            if elapsed_ms + meta.duration_ms > max_duration_ms:
+                break
 
-    frames = sorted(frame_dir.glob("frame_*.png"))
-    frame_count = len(frames)
+            patch_path = extract_dir / f"frame_{meta.index:03d}.webp"
+            _extract_webp_frame(webp_path, meta.index, patch_path, cancel_event=cancel_event)
 
-    if frame_count == 0:
+            with Image.open(patch_path) as patch_image:
+                patch = patch_image.convert("RGBA")
+
+            current = canvas.copy()
+            clear_box = (
+                meta.x_offset,
+                meta.y_offset,
+                meta.x_offset + patch.width,
+                meta.y_offset + patch.height,
+            )
+
+            if not meta.blend:
+                current.paste((0, 0, 0, 0), clear_box)
+
+            current.paste(patch, (meta.x_offset, meta.y_offset), patch)
+
+            output_path = frame_dir / f"frame_{meta.index:03d}.png"
+            current.save(output_path, format="PNG")
+
+            rendered_frames.append((output_path, meta.duration_ms))
+            elapsed_ms += meta.duration_ms
+            canvas = current
+
+            if meta.dispose == "background":
+                canvas.paste((0, 0, 0, 0), clear_box)
+
+    if not rendered_frames:
         return frame_dir, 0, 0
 
-    total_duration_ms = frame_count * 33
-
-    frame_limit = _frame_render_limit(source_size, frame_count)
-
-    if frame_count > frame_limit:
-        step = frame_count / frame_limit
+    frame_limit = _frame_render_limit(source_size, len(rendered_frames))
+    if len(rendered_frames) > frame_limit:
+        sampled_frames = _sample_rendered_frames(rendered_frames, frame_limit)
         sampled_dir = Path(tempfile.mkdtemp(dir=frame_dir))
 
-        for i in range(frame_limit):
-            idx = int(i * step)
-            shutil.copy2(frames[idx], sampled_dir / f"frame_{i:03d}.png")
+        for index, (png_path, _) in enumerate(sampled_frames, 1):
+            shutil.copy2(png_path, sampled_dir / f"frame_{index:03d}.png")
 
-        return sampled_dir, frame_limit * 33, frame_limit
+        # Сохраняем исходную длительность анимации, чтобы sampled-кадры не ускоряли результат.
+        return sampled_dir, elapsed_ms, len(sampled_frames)
 
-    return frame_dir, total_duration_ms, frame_count
+    return frame_dir, elapsed_ms, len(rendered_frames)
 
 
 
@@ -320,8 +351,6 @@ def _encode_png_sequence_to_webm(
         str(frame_dir / "frame_%03d.png"),
         "-vf",
         _scale_filter(target_size),
-        "-r",
-        f"{fps:.6f}",
         "-an",
         "-c:v",
         "libvpx-vp9",
@@ -390,7 +419,6 @@ def _convert_single_webp_main(
     cancel_event=None,
     source_size: int | None = None,
 ) -> tuple[bool, str | None]:
-    print("PNG PIPELINE ENTER")
     last_reason = None
     target_sizes, crf_start, crf_step, cpu_used = _select_profile(source_size)
 
@@ -411,7 +439,6 @@ def _convert_single_webp_main(
                     webp_path,
                     frame_dir,
                     cancel_event=cancel_event,
-                    max_duration_ms=10000,  # 🔥 ВАЖНО
                     source_size=source_size,
                 )
                 if frame_count <= 0 or total_duration_ms <= 0:
@@ -494,7 +521,6 @@ def _convert_single_webp_via_gif(
     cancel_event=None,
     source_size: int | None = None,
 ) -> tuple[bool, str | None]:
-    print("GIF PIPELINE ENTER")
     last_reason = None
     target_sizes, crf_start, crf_step, cpu_used = _select_profile(source_size)
 
@@ -701,28 +727,15 @@ def _convert_single_webp(
     cancel_event=None,
     source_size: int | None = None,
 ) -> tuple[bool, str | None]:
-
-    ok, reason = _convert_single_webp_main(
-        webp_path, out_path, cancel_event=cancel_event, source_size=source_size
-    )
+    ok, reason = _convert_single_webp_main(webp_path, out_path, cancel_event=cancel_event, source_size=source_size)
     if ok:
         return True, None
 
-    # 👉 ВАЖНО: сначала hard fallback (PNG с ограничением по времени)
-    hard_ok, hard_reason = _convert_single_webp_hard_fallback(
-        webp_path, out_path, cancel_event=cancel_event, source_size=source_size
-    )
-    if hard_ok:
-        return True, None
-
-    # 👉 И ТОЛЬКО ПОТОМ GIF
-    gif_ok, gif_reason = _convert_single_webp_via_gif(
-        webp_path, out_path, cancel_event=cancel_event, source_size=source_size
-    )
+    gif_ok, gif_reason = _convert_single_webp_via_gif(webp_path, out_path, cancel_event=cancel_event, source_size=source_size)
     if gif_ok:
         return True, None
 
-    return False, gif_reason or hard_reason or reason or "не удалось конвертировать WEBP"
+    return False, gif_reason or reason or "не удалось конвертировать WEBP"
 
 def convert_webp_to_webm(webp_path: Path, out_path: Path, cancel_event=None, source_size: int | None = None) -> tuple[bool, str | None]:
     return _convert_single_webp(webp_path, out_path, cancel_event=cancel_event, source_size=source_size)
