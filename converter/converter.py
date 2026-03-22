@@ -267,7 +267,7 @@ def _render_webp_to_png_sequence(
 
         for meta in frames:
             _check_cancel(cancel_event)
-            if elapsed_ms + meta.duration_ms > max_duration_ms:
+            if elapsed_ms >= max_duration_ms:
                 break
 
             patch_path = extract_dir / f"frame_{meta.index:03d}.webp"
