@@ -348,6 +348,8 @@ def _encode_png_sequence_to_webm(
         str(frame_dir / "frame_%03d.png"),
         "-vf",
         _scale_filter(target_size),
+        "-r",
+        f"{fps:.6f}",
         "-an",
         "-c:v",
         "libvpx-vp9",
