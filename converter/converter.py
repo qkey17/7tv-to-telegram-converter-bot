@@ -594,7 +594,6 @@ def _convert_single_webp_via_gif(
             "ffmpeg",
             "-y",
             "-i", str(gif_path),
-            "-t", "0.1",
             "-vf",
             "fps=12," + _scale_filter(target_size, flags="bilinear"),
             "-an",
@@ -619,7 +618,16 @@ def _convert_single_webp_via_gif(
     except Exception:
         pass
 
-    return False, last_reason or "GIF fallback не смог уложить WEBM в лимит"
+    hard_ok, hard_reason = _convert_single_webp_hard_fallback(
+        webp_path,
+        out_path,
+        cancel_event=cancel_event,
+        source_size=source_size,
+    )
+    if hard_ok:
+        return True, None
+
+    return False, hard_reason or last_reason or "GIF fallback не смог уложить WEBM в лимит"
 
 
 
@@ -652,7 +660,7 @@ def _convert_single_webp_hard_fallback(
                     webp_path,
                     frame_dir,
                     cancel_event=cancel_event,
-                    max_duration_ms=2400,
+                    max_duration_ms=2000,
                     source_size=source_size,
                 )
                 if frame_count <= 0 or total_duration_ms <= 0:
