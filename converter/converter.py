@@ -264,7 +264,7 @@ def _render_webp_to_png_sequence(
     cmd = [
         "ffmpeg",
         "-y",
-        "-ignore_loop", "0",
+        "-c:v", "libwebp",
         "-i", str(webp_path),
         "-vsync", "0",
         str(frame_dir / "frame_%03d.png"),
