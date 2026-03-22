@@ -266,6 +266,7 @@ def _render_webp_to_png_sequence(
         "-y",
         "-ignore_loop", "0",
         "-i", str(webp_path),
+        "-vsync", "0",
         str(frame_dir / "frame_%03d.png"),
     ]
 
