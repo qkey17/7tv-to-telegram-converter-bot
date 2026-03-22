@@ -308,20 +308,15 @@ def _render_webp_to_png_sequence(
         sampled_dir = Path(tempfile.mkdtemp(dir=frame_dir))
 
         original_total = sum(d for _, d in rendered_frames)
-        new_total = 0
+        new_count = len(sampled_frames)
 
-        for index, (png_path, duration) in enumerate(sampled_frames, 1):
+        # 👉 распределяем время равномерно
+        new_duration_per_frame = original_total / new_count
+
+        for index, (png_path, _) in enumerate(sampled_frames, 1):
             shutil.copy2(png_path, sampled_dir / f"frame_{index:03d}.png")
-            new_total += duration
 
-        # 👉 растягиваем длительность обратно
-        if new_total > 0:
-            scale = original_total / new_total
-            new_total = int(new_total * scale)
-        else:
-            new_total = elapsed_ms
-
-        return sampled_dir, new_total, len(sampled_frames)
+        return sampled_dir, int(original_total), new_count
 
     return frame_dir, elapsed_ms, len(rendered_frames)
 
