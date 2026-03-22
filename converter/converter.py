@@ -594,7 +594,7 @@ def _convert_single_webp_via_gif(
             "ffmpeg",
             "-y",
             "-i", str(gif_path),
-            "-t", "1",
+            "-t", "0.1",
             "-vf",
             "fps=12," + _scale_filter(target_size, flags="bilinear"),
             "-an",
