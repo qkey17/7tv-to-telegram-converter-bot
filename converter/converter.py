@@ -332,7 +332,10 @@ def _encode_png_sequence_to_webm(
     cancel_event=None,
     cpu_used: int = 4,
 ) -> None:
-    fps = max(1.0 / 1000.0, frame_count * 1000.0 / max(1, total_duration_ms))
+    fps = min(
+        30,
+        max(1.0, frame_count * 1000.0 / max(1, total_duration_ms))
+    )
 
     cmd = [
         "ffmpeg",
