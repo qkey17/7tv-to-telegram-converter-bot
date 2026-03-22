@@ -727,15 +727,28 @@ def _convert_single_webp(
     cancel_event=None,
     source_size: int | None = None,
 ) -> tuple[bool, str | None]:
-    ok, reason = _convert_single_webp_main(webp_path, out_path, cancel_event=cancel_event, source_size=source_size)
+
+    ok, reason = _convert_single_webp_main(
+        webp_path, out_path, cancel_event=cancel_event, source_size=source_size
+    )
     if ok:
         return True, None
 
-    gif_ok, gif_reason = _convert_single_webp_via_gif(webp_path, out_path, cancel_event=cancel_event, source_size=source_size)
+    # 👉 ВАЖНО: сначала hard fallback (PNG с ограничением по времени)
+    hard_ok, hard_reason = _convert_single_webp_hard_fallback(
+        webp_path, out_path, cancel_event=cancel_event, source_size=source_size
+    )
+    if hard_ok:
+        return True, None
+
+    # 👉 И ТОЛЬКО ПОТОМ GIF
+    gif_ok, gif_reason = _convert_single_webp_via_gif(
+        webp_path, out_path, cancel_event=cancel_event, source_size=source_size
+    )
     if gif_ok:
         return True, None
 
-    return False, gif_reason or reason or "не удалось конвертировать WEBP"
+    return False, gif_reason or hard_reason or reason or "не удалось конвертировать WEBP"
 
 def convert_webp_to_webm(webp_path: Path, out_path: Path, cancel_event=None, source_size: int | None = None) -> tuple[bool, str | None]:
     return _convert_single_webp(webp_path, out_path, cancel_event=cancel_event, source_size=source_size)
