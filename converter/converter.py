@@ -260,27 +260,18 @@ def _render_webp_to_png_sequence(
 
     _check_cancel(cancel_event)
 
-    # получаем список кадров
-    _, _, frames = _probe_webp(webp_path, cancel_event=cancel_event)
+    # dwebp умеет сразу распаковать ВСЮ анимацию
+    cmd = [
+        "dwebp",
+        str(webp_path),
+        "-o",
+        str(frame_dir / "frame_%03d.png"),
+    ]
 
-    rendered = []
+    _run_subprocess(cmd, cancel_event=cancel_event)
 
-    for i, meta in enumerate(frames):
-        _check_cancel(cancel_event)
-
-        webp_frame = frame_dir / f"frame_{i:03d}.webp"
-        png_frame = frame_dir / f"frame_{i:03d}.png"
-
-        _extract_webp_frame(webp_path, meta.index, webp_frame, cancel_event=cancel_event)
-
-        _run_subprocess(
-            ["dwebp", str(webp_frame), "-o", str(png_frame)],
-            cancel_event=cancel_event,
-        )
-
-        rendered.append(png_frame)
-
-    frame_count = len(rendered)
+    frames = sorted(frame_dir.glob("frame_*.png"))
+    frame_count = len(frames)
 
     if frame_count == 0:
         return frame_dir, 0, 0
@@ -295,7 +286,7 @@ def _render_webp_to_png_sequence(
 
         for i in range(frame_limit):
             idx = int(i * step)
-            shutil.copy2(rendered[idx], sampled_dir / f"frame_{i:03d}.png")
+            shutil.copy2(frames[idx], sampled_dir / f"frame_{i:03d}.png")
 
         return sampled_dir, frame_limit * 33, frame_limit
 
