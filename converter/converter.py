@@ -257,69 +257,42 @@ def _render_webp_to_png_sequence(
     max_duration_ms: int = 2950,
     source_size: int | None = None,
 ) -> tuple[Path, int, int]:
-    canvas_w, canvas_h, frames = _probe_webp(webp_path, cancel_event=cancel_event)
-    rendered_frames: list[tuple[Path, int]] = []
-    elapsed_ms = 0
 
-    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    _check_cancel(cancel_event)
 
-    with tempfile.TemporaryDirectory(dir=frame_dir) as extract_tmp:
-        extract_dir = Path(extract_tmp)
+    # 👉 вытаскиваем ВСЕ кадры через ffmpeg
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", str(webp_path),
+        str(frame_dir / "frame_%03d.png"),
+    ]
 
-        for meta in frames:
-            _check_cancel(cancel_event)
-            if elapsed_ms >= max_duration_ms:
-                break
+    _run_subprocess(cmd, cancel_event=cancel_event)
 
-            patch_path = extract_dir / f"frame_{meta.index:03d}.webp"
-            _extract_webp_frame(webp_path, meta.index, patch_path, cancel_event=cancel_event)
+    frames = sorted(frame_dir.glob("frame_*.png"))
+    frame_count = len(frames)
 
-            with Image.open(patch_path) as patch_image:
-                patch = patch_image.convert("RGBA")
-
-            current = canvas.copy()
-            clear_box = (
-                meta.x_offset,
-                meta.y_offset,
-                meta.x_offset + patch.width,
-                meta.y_offset + patch.height,
-            )
-
-            if not meta.blend:
-                current.paste((0, 0, 0, 0), clear_box)
-
-            current.paste(patch, (meta.x_offset, meta.y_offset), patch)
-
-            output_path = frame_dir / f"frame_{meta.index:03d}.png"
-            current.save(output_path, format="PNG")
-
-            rendered_frames.append((output_path, meta.duration_ms))
-            elapsed_ms += meta.duration_ms
-            canvas = current
-
-            if meta.dispose == "background":
-                canvas.paste((0, 0, 0, 0), clear_box)
-
-    if not rendered_frames:
+    if frame_count == 0:
         return frame_dir, 0, 0
 
-    frame_limit = _frame_render_limit(source_size, len(rendered_frames))
-    if len(rendered_frames) > frame_limit:
-        sampled_frames = _sample_rendered_frames(rendered_frames, frame_limit)
+    # 👉 нормальная длительность (без webpmux)
+    total_duration_ms = frame_count * 33  # ~20 FPS
+
+    # 👉 лимит кадров (как было)
+    frame_limit = _frame_render_limit(source_size, frame_count)
+
+    if frame_count > frame_limit:
+        step = frame_count / frame_limit
         sampled_dir = Path(tempfile.mkdtemp(dir=frame_dir))
 
-        original_total = sum(d for _, d in rendered_frames)
-        new_count = len(sampled_frames)
+        for i in range(frame_limit):
+            idx = int(i * step)
+            shutil.copy2(frames[idx], sampled_dir / f"frame_{i:03d}.png")
 
-        # 👉 распределяем время равномерно
-        new_duration_per_frame = original_total / new_count
+        return sampled_dir, int(frame_limit * 50), frame_limit
 
-        for index, (png_path, _) in enumerate(sampled_frames, 1):
-            shutil.copy2(png_path, sampled_dir / f"frame_{index:03d}.png")
-
-        return sampled_dir, int(original_total), new_count
-
-    return frame_dir, elapsed_ms, len(rendered_frames)
+    return frame_dir, total_duration_ms, frame_count
 
 
 
