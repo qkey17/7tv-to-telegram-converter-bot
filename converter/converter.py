@@ -13,6 +13,8 @@ from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
+print("CONVERTER VERSION 999")
+
 MAX_WEBM_SIZE = 64 * 1024
 TARGET_FRAME_DURATION_MS = 30
 TARGET_SIZES = (100, 96, 92, 88, 84, 80)
