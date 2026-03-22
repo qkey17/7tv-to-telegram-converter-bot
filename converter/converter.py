@@ -260,28 +260,33 @@ def _render_webp_to_png_sequence(
 
     _check_cancel(cancel_event)
 
-    # 👉 вытаскиваем ВСЕ кадры через ffmpeg
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-c:v", "libwebp",
-        "-i", str(webp_path),
-        "-vsync", "0",
-        str(frame_dir / "frame_%03d.png"),
-    ]
+    # получаем список кадров
+    _, _, frames = _probe_webp(webp_path, cancel_event=cancel_event)
 
-    _run_subprocess(cmd, cancel_event=cancel_event)
+    rendered = []
 
-    frames = sorted(frame_dir.glob("frame_*.png"))
-    frame_count = len(frames)
+    for i, meta in enumerate(frames):
+        _check_cancel(cancel_event)
+
+        webp_frame = frame_dir / f"frame_{i:03d}.webp"
+        png_frame = frame_dir / f"frame_{i:03d}.png"
+
+        _extract_webp_frame(webp_path, meta.index, webp_frame, cancel_event=cancel_event)
+
+        _run_subprocess(
+            ["dwebp", str(webp_frame), "-o", str(png_frame)],
+            cancel_event=cancel_event,
+        )
+
+        rendered.append(png_frame)
+
+    frame_count = len(rendered)
 
     if frame_count == 0:
         return frame_dir, 0, 0
 
-    # 👉 нормальная длительность (без webpmux)
-    total_duration_ms = frame_count * 33  # ~20 FPS
+    total_duration_ms = frame_count * 33
 
-    # 👉 лимит кадров (как было)
     frame_limit = _frame_render_limit(source_size, frame_count)
 
     if frame_count > frame_limit:
@@ -290,9 +295,9 @@ def _render_webp_to_png_sequence(
 
         for i in range(frame_limit):
             idx = int(i * step)
-            shutil.copy2(frames[idx], sampled_dir / f"frame_{i:03d}.png")
+            shutil.copy2(rendered[idx], sampled_dir / f"frame_{i:03d}.png")
 
-        return sampled_dir, int(frame_limit * 50), frame_limit
+        return sampled_dir, frame_limit * 33, frame_limit
 
     return frame_dir, total_duration_ms, frame_count
 
