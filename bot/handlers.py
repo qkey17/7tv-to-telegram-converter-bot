@@ -576,7 +576,7 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def about_text() -> str:
-    return "Бот запущен."
+    return "Принимает только полный ссылки на emote-set или single emote.\n\nemote-set:\nhttps://7tv.app/emote-sets/xxxxxxxxxxxx\n\nsingle emote:\nhttps://7tv.app/emotes/xxxxxxxxxxxx"
 
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
