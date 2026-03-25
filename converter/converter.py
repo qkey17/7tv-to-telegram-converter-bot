@@ -63,10 +63,7 @@ def _im_cmd() -> list[str]:
 
 
 def _scale_filter(target_size: int, flags: str = "lanczos") -> str:
-    return (
-        f"crop='min(iw\\,ih)':'min(iw\\,ih)':(iw-min(iw\\,ih))/2:(ih-min(iw\\,ih))/2,"
-        f"scale={target_size}:{target_size}:flags={flags}"
-    )
+    return f"scale={target_size}:{target_size}:flags={flags}"
 
 
 def _check_cancel(cancel_event=None):
